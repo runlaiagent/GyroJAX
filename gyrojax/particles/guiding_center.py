@@ -241,8 +241,11 @@ def init_maxwellian_particles(
     vpar  = jax.random.normal(k4, (N,)) * vti
 
     # μ ~ Exp(Ti/B0): sample v_perp from Rayleigh, compute μ = m*v_perp²/(2B)
+    # Clamp to 4*vti to avoid extreme-tail particles with huge drifts
     u = jax.random.uniform(k5, (N,))
     v_perp = vti * jnp.sqrt(-2.0 * jnp.log(jnp.clip(u, 1e-10, 1.0)))
+    v_perp = jnp.clip(v_perp, 0.0, 4.0 * vti)   # cap at 4 vti
+    vpar   = jnp.clip(vpar,  -4.0 * vti, 4.0 * vti)  # same for vpar
     B_on_axis = geom.B0
     mu = 0.5 * mi * v_perp**2 / B_on_axis
 

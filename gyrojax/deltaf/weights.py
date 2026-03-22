@@ -1,4 +1,3 @@
-# FILE: gyrojax/deltaf/weights.py
 """
 Delta-f weight evolution for gyrokinetic PIC.
 
@@ -6,17 +5,21 @@ The delta-f method decomposes the distribution function as:
     f = f0 + δf = f0(1 + w)
 where f0 is a known Maxwellian background and w = δf/f0 is the marker weight.
 
-Weight equation (from the Vlasov equation applied to δf):
-    dw/dt = -(1-w) * C[f0]/f0
-where C[f0] = (∂f0/∂t + v·∇f0 + F·∂f0/∂v) is the phase-space advection of f0.
+Weight equation (GK Vlasov):
+    dw/dt = -(1-w) * [(vE + vd) · ∇ln(f0) + (q/m)·E∥ · ∂ln(f0)/∂v∥]
 
-For electrostatic ITG with adiabatic electrons:
-    dw/dt = -(1-w) * [vE·∇ln(f0) + (q/m)*E∥ * ∂ln(f0)/∂v∥]
+where:
+  vE  = E×B/B²          (E×B drift — from perturbation φ)
+  vd  = v_∇B + v_curv   (magnetic drifts — equilibrium, drives ITG)
 
-With a Maxwellian f0(r, v∥, μ):
-    ln(f0) = ln(n0(r)) - (m*v∥²/2 + μ*B(r,θ)) / T(r) + const
-    ∂ln(f0)/∂r   = d_ln_n0/dr - μ*(∂B/∂r)/T - (m*v∥²/2 + μ*B)*(d_ln_T/dr)/T
-    ∂ln(f0)/∂v∥  = -m*v∥/T
+With Maxwellian f0(r, v∥, μ):
+    ln(f0) = ln(n0(r)) - H/T(r) + const
+    H = m*v∥²/2 + μ*B(r,θ)
+    ∂ln(f0)/∂r  = d_ln_n0/dr - μ*(∂B/∂r)/T - H*(d_ln_T/dr)/T
+    ∂ln(f0)/∂v∥ = -m*v∥/T
+
+The magnetic drift term vd·∂ln(f0)/∂r is the ITG drive:
+  vd ∝ ∇T/T × (v∥² + μB/m)  → couples to d_ln_T/dr = -R0/LT
 
 References:
     Lin et al. (1998) Science 281, 1835
@@ -38,31 +41,24 @@ def maxwellian_f0(
     T: jnp.ndarray,
     mi: float,
 ) -> jnp.ndarray:
-    """
-    Evaluate the background Maxwellian f0 at particle positions.
-
-    f0(r, v∥, μ) = n0(r) / (sqrt(π)*v_t)³ * exp(-H/T)
-    H = m*v∥²/2 + μ*B   (guiding center Hamiltonian)
-    """
+    """Evaluate background Maxwellian f0 at particle positions."""
     vt = jnp.sqrt(2.0 * T / mi)
     H  = 0.5 * mi * vpar**2 + mu * B
     return n0 / (jnp.pi**1.5 * vt**3) * jnp.exp(-H / T)
 
 
 def log_f0_gradients(
-    r: jnp.ndarray,
     vpar: jnp.ndarray,
     mu: jnp.ndarray,
     B: jnp.ndarray,
     gradB_r: jnp.ndarray,
-    n0: jnp.ndarray,
     T: jnp.ndarray,
     d_ln_n0_dr: jnp.ndarray,
     d_ln_T_dr: jnp.ndarray,
     mi: float,
 ) -> tuple:
     """
-    Compute gradients of ln(f0) needed for weight evolution.
+    Compute gradients of ln(f0) for the weight evolution.
 
     Returns
     -------
@@ -80,18 +76,49 @@ def log_f0_gradients(
     return d_lnf0_dr, d_lnf0_dvp
 
 
+def _compute_drift_r(
+    vpar: jnp.ndarray,
+    mu: jnp.ndarray,
+    B: jnp.ndarray,
+    gradB_r: jnp.ndarray,
+    gradB_th: jnp.ndarray,
+    kappa_r: jnp.ndarray,
+    kappa_th: jnp.ndarray,
+    r: jnp.ndarray,
+    q_at_r: jnp.ndarray,
+    R0: float,
+    q_over_m: float,
+    mi: float,
+) -> jnp.ndarray:
+    """
+    Radial magnetic drift velocity vd_r = v_gradB_r + v_curv_r.
+
+    This is the drift that drives ITG when dotted with ∂ln(f0)/∂r.
+    """
+    Omega = q_over_m * B                              # cyclotron frequency
+    prefac_grad = (mu / (mi * jnp.maximum(Omega, 1e-10)))
+    prefac_curv = (vpar**2 / jnp.maximum(Omega, 1e-10))
+
+    # ∇B drift radial component: -(μ/mΩ) * ∂B/∂θ / r
+    v_gradB_r = -prefac_grad * gradB_th / jnp.maximum(r, 1e-6)
+
+    # Curvature drift radial component: -(v∥²/Ω) * κ_θ / r
+    v_curv_r  = -prefac_curv * kappa_th / jnp.maximum(r, 1e-6)
+
+    return v_gradB_r + v_curv_r
+
+
 def _weight_rhs(
     w: jnp.ndarray,
-    vE_r: jnp.ndarray,
-    dvpar_dt: jnp.ndarray,
+    vdrift_r: jnp.ndarray,   # total radial drift: vE_r + vd_r
+    dvpar_dt: jnp.ndarray,   # E∥-driven parallel force (≈0 for perp modes)
     d_lnf0_dr: jnp.ndarray,
     d_lnf0_dvp: jnp.ndarray,
 ) -> jnp.ndarray:
     """
-    RHS of the weight evolution equation.
-        dw/dt = -(1-w) * [vE_r * d_lnf0_dr + dvpar_dt * d_lnf0_dvp]
+    dw/dt = -(1-w) * [v_total_r * d_lnf0_dr + dvpar_dt * d_lnf0_dvp]
     """
-    return -(1.0 - w) * (vE_r * d_lnf0_dr + dvpar_dt * d_lnf0_dvp)
+    return -(1.0 - w) * (vdrift_r * d_lnf0_dr + dvpar_dt * d_lnf0_dvp)
 
 
 @jax.jit
@@ -101,50 +128,68 @@ def update_weights(
     E_theta: jnp.ndarray,
     B: jnp.ndarray,
     gradB_r: jnp.ndarray,
+    gradB_th: jnp.ndarray,
+    kappa_r: jnp.ndarray,
+    kappa_th: jnp.ndarray,
+    q_at_r: jnp.ndarray,
     n0: jnp.ndarray,
     T: jnp.ndarray,
     d_ln_n0_dr: jnp.ndarray,
     d_ln_T_dr: jnp.ndarray,
     q_over_m: float,
     mi: float,
+    R0: float,
     dt: float,
 ) -> GCState:
     """
     Advance delta-f weights by one timestep using RK4.
 
+    Includes both E×B and magnetic drift drives (∇B + curvature).
+    The magnetic drift term is essential for ITG excitation.
+
     Parameters
     ----------
-    state       : GCState with current particle positions/velocities
-    E_r/theta   : electric field at particle positions, shape (N,)
-    B           : |B| at particle positions, shape (N,)
-    gradB_r     : ∂B/∂r at particle positions, shape (N,)
-    n0, T       : background density and temperature at particle r, shape (N,)
-    d_ln_n0_dr  : d(ln n0)/dr at particle r, shape (N,)
-    d_ln_T_dr   : d(ln T)/dr at particle r, shape (N,)
-    q_over_m    : charge-to-mass ratio [C/kg]
-    mi          : ion mass [kg]
-    dt          : timestep [s]
+    state        : GCState with current positions/velocities
+    E_r, E_theta : E-field at particle positions (N,)
+    B, gradB_r, gradB_th, kappa_r, kappa_th : geometry at particles (N,)
+    q_at_r       : safety factor at particle r (N,)
+    n0, T        : background profiles at particle positions (N,)
+    d_ln_n0_dr   : d(ln n0)/dr (N,)
+    d_ln_T_dr    : d(ln T)/dr  (N,)
+    q_over_m     : e/m
+    mi           : ion mass
+    R0           : major radius
+    dt           : timestep
     """
-    # E×B radial drift
-    vE_r = -E_theta / B
+    # E×B radial drift from perturbed field
+    vE_r = -E_theta / jnp.maximum(B, 1e-10)
 
-    # Parallel force (for weight drive)
-    # dvpar/dt from electric field only (for weight equation, not position push)
-    E_par = jnp.zeros_like(E_r)   # electrostatic: E_par ≈ 0 for perp modes
-    dvpar_dt = -(state.mu / mi) * gradB_r + q_over_m * E_par
-
-    d_lnf0_dr, d_lnf0_dvp = log_f0_gradients(
-        state.r, state.vpar, state.mu, B, gradB_r,
-        n0, T, d_ln_n0_dr, d_ln_T_dr, mi
+    # Equilibrium magnetic drift (drives ITG!)
+    vd_r = _compute_drift_r(
+        state.vpar, state.mu, B, gradB_r, gradB_th,
+        kappa_r, kappa_th, state.r, q_at_r, R0, q_over_m, mi
     )
 
-    # RK4 on weights
-    k1 = _weight_rhs(state.weight, vE_r, dvpar_dt, d_lnf0_dr, d_lnf0_dvp)
-    k2 = _weight_rhs(state.weight + 0.5*dt*k1, vE_r, dvpar_dt, d_lnf0_dr, d_lnf0_dvp)
-    k3 = _weight_rhs(state.weight + 0.5*dt*k2, vE_r, dvpar_dt, d_lnf0_dr, d_lnf0_dvp)
-    k4 = _weight_rhs(state.weight + dt*k3,      vE_r, dvpar_dt, d_lnf0_dr, d_lnf0_dvp)
+    # Total radial drift in weight equation
+    v_total_r = vE_r + vd_r
 
-    new_weight = state.weight + (dt/6.0) * (k1 + 2*k2 + 2*k3 + k4)
+    # E∥ ≈ 0 for electrostatic perpendicular modes
+    dvpar_dt_ES = jnp.zeros_like(state.vpar)
+
+    d_lnf0_dr, d_lnf0_dvp = log_f0_gradients(
+        state.vpar, state.mu, B, gradB_r,
+        T, d_ln_n0_dr, d_ln_T_dr, mi
+    )
+
+    # RK4 integration
+    k1 = _weight_rhs(state.weight, v_total_r, dvpar_dt_ES, d_lnf0_dr, d_lnf0_dvp)
+    k2 = _weight_rhs(state.weight + 0.5*dt*k1, v_total_r, dvpar_dt_ES, d_lnf0_dr, d_lnf0_dvp)
+    k3 = _weight_rhs(state.weight + 0.5*dt*k2, v_total_r, dvpar_dt_ES, d_lnf0_dr, d_lnf0_dvp)
+    k4 = _weight_rhs(state.weight + dt*k3,      v_total_r, dvpar_dt_ES, d_lnf0_dr, d_lnf0_dvp)
+
+    new_weight = state.weight + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+    # Safety clamp: |w| should stay << 1 for the δf approximation to hold
+    new_weight = jnp.clip(new_weight, -10.0, 10.0)
 
     return GCState(
         r=state.r, theta=state.theta, zeta=state.zeta,

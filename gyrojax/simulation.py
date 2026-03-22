@@ -104,7 +104,11 @@ def run_simulation(cfg: SimConfig, key: jax.random.PRNGKey = None):
         cfg.N_particles, geom, cfg.vti, cfg.Ti, cfg.mi, key
     )
 
-    # Initial phi = 0
+    # Seed small ITG perturbation: w = ε·sin(m·θ) at m=2
+    # This seeds the CBC poloidal mode structure
+    pert_amp = 1e-4
+    pert = pert_amp * jnp.sin(2.0 * state.theta + state.zeta)
+    state = state._replace(weight=pert)
     phi = jnp.zeros((cfg.Nr, cfg.Ntheta, cfg.Nzeta))
 
     q_over_m = cfg.e / cfg.mi
@@ -125,10 +129,12 @@ def run_simulation(cfg: SimConfig, key: jax.random.PRNGKey = None):
 
         # 4. Push particles
         state = push_particles(state, E_r_p, E_th_p, E_ze_p, geom, q_over_m, cfg.mi, cfg.dt)
+        # clamp radial position (simple BC)
+        state = state._replace(r=jnp.clip(state.r, geom.r_grid[0]*1.001, geom.r_grid[-1]*0.999))
 
-        # 5. Update weights (need profiles at particle positions)
+        # 5. Update weights (need full geometry + profiles at particle positions)
         from gyrojax.geometry.salpha import interp_geometry_to_particles
-        B_p, gradB_r_p, _, _, _ = interp_geometry_to_particles(
+        B_p, gradB_r_p, gradB_th_p, kappa_r_p, kappa_th_p = interp_geometry_to_particles(
             geom, state.r, state.theta, state.zeta
         )
         # Profile values at particles
@@ -137,11 +143,16 @@ def run_simulation(cfg: SimConfig, key: jax.random.PRNGKey = None):
         LT = cfg.R0 / cfg.R0_over_LT
         d_ln_n0_dr = jnp.full_like(state.r, -1.0 / Ln)
         d_ln_T_dr  = jnp.full_like(state.r, -1.0 / LT)
+        # Safety factor at particle positions (for drift normalization)
+        dr = (geom.r_grid[-1] - geom.r_grid[0]) / (len(geom.r_grid) - 1)
+        ir = jnp.clip((state.r - geom.r_grid[0]) / dr, 0, len(geom.r_grid) - 1.001)
+        q_at_r_p = geom.q_profile[jnp.floor(ir).astype(jnp.int32)]
 
         state = update_weights(
-            state, E_r_p, E_th_p, B_p, gradB_r_p,
+            state, E_r_p, E_th_p, B_p, gradB_r_p, gradB_th_p,
+            kappa_r_p, kappa_th_p, q_at_r_p,
             n0_p, T_p, d_ln_n0_dr, d_ln_T_dr,
-            q_over_m, cfg.mi, cfg.dt
+            q_over_m, cfg.mi, cfg.R0, cfg.dt
         )
 
         # 6. Diagnostics

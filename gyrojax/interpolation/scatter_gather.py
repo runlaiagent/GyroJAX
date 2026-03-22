@@ -1,236 +1,144 @@
-# FILE: gyrojax/interpolation/scatter_gather.py
 """
-Gyroaveraged scatter and gather operations for gyrokinetic PIC.
+Gyroaveraged scatter (particle → grid) and gather (grid → particle).
 
-Gyroaveraging replaces the full particle position with an average over the
-Larmor ring. For a 4-point gyroaverage:
-    <φ>(R) = (1/4) Σ_{k=0}^{3} φ(R + ρ_L * [cos(kπ/2), sin(kπ/2)] · e_perp)
-
-where ρ_L = sqrt(2μm) / (eB) is the local Larmor radius.
-
-In s-α geometry, the perpendicular plane is approximately the (r,θ) plane,
-so the 4 ring points shift in (r, θ) directions.
-
-GPU-safe scatter uses jax.lax.scatter with SUM mode (atomic add equivalent).
+Uses fully-vectorized JAX operations — no Python for-loops.
 """
 
 from __future__ import annotations
 import jax
 import jax.numpy as jnp
-from gyrojax.particles.guiding_center import GCState
 from gyrojax.geometry.salpha import SAlphaGeometry, interp_geometry_to_particles
 
 
-def _larmor_ring_points(
-    r: jnp.ndarray,
-    theta: jnp.ndarray,
-    zeta: jnp.ndarray,
-    rho_L: jnp.ndarray,
-    n_points: int = 4,
-) -> tuple:
-    """
-    Compute n_points positions on the Larmor ring around guiding center (r, θ, ζ).
+# ---------------------------------------------------------------------------
+# Trilinear interpolation helpers  (fully vectorized over N particles)
+# ---------------------------------------------------------------------------
 
-    The ring lies in the (r, θ) plane (perpendicular to B in s-α).
-
-    Returns
-    -------
-    ring_r, ring_theta, ring_zeta : each shape (n_points, N_particles)
-    """
-    angles = jnp.linspace(0.0, 2.0 * jnp.pi, n_points, endpoint=False)  # (n_points,)
-    # Shape: (n_points, N)
-    dr    = rho_L[None, :] * jnp.cos(angles[:, None])
-    dtheta_arc = rho_L[None, :] * jnp.sin(angles[:, None]) / jnp.maximum(r[None, :], 1e-6)
-
-    ring_r     = r[None, :]     + dr
-    ring_theta = theta[None, :] + dtheta_arc
-    ring_zeta  = jnp.broadcast_to(zeta[None, :], (n_points, len(zeta)))
-
-    return ring_r, ring_theta % (2*jnp.pi), ring_zeta % (2*jnp.pi)
-
-
-def _trilinear_index_weights(
-    r: jnp.ndarray,
-    theta: jnp.ndarray,
-    zeta: jnp.ndarray,
+def _get_trilinear_weights(
+    r: jnp.ndarray,        # (N,)
+    theta: jnp.ndarray,    # (N,)
+    zeta: jnp.ndarray,     # (N,)
     geom: SAlphaGeometry,
-    Nr: int, Ntheta: int, Nzeta: int,
-) -> tuple:
+    grid_shape: tuple,
+):
     """
-    Compute trilinear interpolation indices and weights for positions (r, θ, ζ).
+    Return indices and weights for trilinear interp / scatter, vectorized.
 
-    Returns
-    -------
-    i0, j0, k0 : integer base indices, each shape (N,)
-    wr, wt, wz : fractional weights in [0,1], each shape (N,)
+    Returns:
+        i0, i1  : (N,)  lower/upper r  indices
+        j0, j1  : (N,)  lower/upper θ  indices
+        k0, k1  : (N,)  lower/upper ζ  indices
+        wr, wt, wz : (N,) fractional positions in each direction
     """
-    # Radial
-    dr   = (geom.r_grid[-1] - geom.r_grid[0]) / (Nr - 1)
-    ir   = (r - geom.r_grid[0]) / dr
-    i0   = jnp.clip(ir.astype(jnp.int32), 0, Nr - 2)
-    wr   = jnp.clip(ir - i0.astype(jnp.float32), 0.0, 1.0)
+    Nr, Ntheta, Nzeta = grid_shape
 
-    # Poloidal (periodic)
-    dth  = 2.0 * jnp.pi / Ntheta
-    jth  = theta / dth
-    j0   = (jth.astype(jnp.int32)) % Ntheta
-    wt   = jnp.clip(jth - jnp.floor(jth), 0.0, 1.0)
+    # --- r (clamped, non-periodic) ---
+    r0, r1 = geom.r_grid[0], geom.r_grid[-1]
+    dr = (r1 - r0) / (Nr - 1)
+    ir  = jnp.clip((r - r0) / dr, 0.0, Nr - 1.001)
+    i0  = jnp.floor(ir).astype(jnp.int32)
+    i1  = jnp.clip(i0 + 1, 0, Nr - 1)
+    wr  = ir - i0.astype(jnp.float32)
 
-    # Toroidal (periodic)
-    dze  = 2.0 * jnp.pi / Nzeta
-    kze  = zeta / dze
-    k0   = (kze.astype(jnp.int32)) % Nzeta
-    wz   = jnp.clip(kze - jnp.floor(kze), 0.0, 1.0)
+    # --- θ (periodic) ---
+    it  = (theta % (2 * jnp.pi)) / (2 * jnp.pi) * Ntheta
+    j0  = jnp.floor(it).astype(jnp.int32) % Ntheta
+    j1  = (j0 + 1) % Ntheta
+    wt  = it - jnp.floor(it)
 
-    return i0, j0, k0, wr, wt, wz
+    # --- ζ (periodic) ---
+    iz  = (zeta % (2 * jnp.pi)) / (2 * jnp.pi) * Nzeta
+    k0  = jnp.floor(iz).astype(jnp.int32) % Nzeta
+    k1  = (k0 + 1) % Nzeta
+    wz  = iz - jnp.floor(iz)
+
+    return i0, i1, j0, j1, k0, k1, wr, wt, wz
+
+
+def _scatter_one_corner(
+    grid: jnp.ndarray,    # (Nr*Ntheta*Nzeta,) flat
+    ii: jnp.ndarray,      # (N,) int32
+    jj: jnp.ndarray,      # (N,) int32
+    kk: jnp.ndarray,      # (N,) int32
+    w:  jnp.ndarray,      # (N,) float32  combined weight
+    grid_shape: tuple,
+) -> jnp.ndarray:
+    Nr, Ntheta, Nzeta = grid_shape
+    flat = ii * (Ntheta * Nzeta) + jj * Nzeta + kk
+    return grid.at[flat].add(w)
 
 
 def scatter_to_grid(
-    state: GCState,
+    state,
     geom: SAlphaGeometry,
     grid_shape: tuple,
     mi: float,
     e: float,
-    n_gyro: int = 4,
 ) -> jnp.ndarray:
     """
-    Scatter gyroaveraged delta-f density δn onto the (r, θ, ζ) grid.
+    Scatter particle weights to grid (no gyroaveraging for now — point scatter).
 
-    For each particle, deposit weight to n_gyro ring points with equal
-    1/n_gyro weighting (gyroaveraging). Uses jax.lax.scatter for GPU safety.
-
-    Parameters
-    ----------
-    state      : GCState
-    geom       : SAlphaGeometry
-    grid_shape : (Nr, Ntheta, Nzeta)
-    mi, e      : ion mass and charge
-    n_gyro     : number of gyroaverage points (default 4)
-
-    Returns
-    -------
-    delta_n : (Nr, Ntheta, Nzeta) gyroaveraged perturbed density
+    Returns delta_n: (Nr, Ntheta, Nzeta) charge density perturbation.
     """
     Nr, Ntheta, Nzeta = grid_shape
-    N = state.r.shape[0]
-
-    # Compute Larmor radius at guiding center B
-    B_gc, _, _, _, _ = interp_geometry_to_particles(geom, state.r, state.theta, state.zeta)
-    rho_L = jnp.sqrt(2.0 * state.mu * mi) / (e * B_gc)
-
-    # Ring points: (n_gyro, N)
-    ring_r, ring_th, ring_ze = _larmor_ring_points(
-        state.r, state.theta, state.zeta, rho_L, n_gyro
+    i0, i1, j0, j1, k0, k1, wr, wt, wz = _get_trilinear_weights(
+        state.r, state.theta, state.zeta, geom, grid_shape
     )
+    val = state.weight.astype(jnp.float32)
+    size = Nr * Ntheta * Nzeta
+    grid = jnp.zeros(size, dtype=jnp.float32)
 
-    delta_n = jnp.zeros(grid_shape)
+    # 8 corners (vectorized at-scatter, no Python loops in hot path)
+    grid = _scatter_one_corner(grid, i0, j0, k0, val*(1-wr)*(1-wt)*(1-wz), grid_shape)
+    grid = _scatter_one_corner(grid, i1, j0, k0, val*   wr *(1-wt)*(1-wz), grid_shape)
+    grid = _scatter_one_corner(grid, i0, j1, k0, val*(1-wr)*   wt *(1-wz), grid_shape)
+    grid = _scatter_one_corner(grid, i0, j0, k1, val*(1-wr)*(1-wt)*   wz , grid_shape)
+    grid = _scatter_one_corner(grid, i1, j1, k0, val*   wr *   wt *(1-wz), grid_shape)
+    grid = _scatter_one_corner(grid, i1, j0, k1, val*   wr *(1-wt)*   wz , grid_shape)
+    grid = _scatter_one_corner(grid, i0, j1, k1, val*(1-wr)*   wt *   wz , grid_shape)
+    grid = _scatter_one_corner(grid, i1, j1, k1, val*   wr *   wt *   wz , grid_shape)
 
-    # Process each ring point
-    for k in range(n_gyro):
-        rk = ring_r[k]
-        thk = ring_th[k]
-        zek = ring_ze[k]
-
-        i0, j0, k0, wr, wt, wz = _trilinear_index_weights(
-            rk, thk, zek, geom, Nr, Ntheta, Nzeta
-        )
-        i1 = (i0 + 1) % Nr
-        j1 = (j0 + 1) % Ntheta
-        k1 = (k0 + 1) % Nzeta
-
-        val = state.weight / n_gyro   # gyroaveraged weight
-
-        # Trilinear 8-corner deposit
-        for (ii, jj, kk, wx, wy_w, wz_w) in [
-            (i0, j0, k0, (1-wr)*(1-wt)*(1-wz)),
-            (i1, j0, k0,    wr *(1-wt)*(1-wz)),
-            (i0, j1, k0, (1-wr)*   wt *(1-wz)),
-            (i0, j0, k1, (1-wr)*(1-wt)*   wz ),
-            (i1, j1, k0,    wr *   wt *(1-wz)),
-            (i1, j0, k1,    wr *(1-wt)*   wz ),
-            (i0, j1, k1, (1-wr)*   wt *   wz ),
-            (i1, j1, k1,    wr *   wt *   wz ),
-        ]:
-            flat_idx = ii * (Ntheta * Nzeta) + jj * Nzeta + kk
-            flat_n   = delta_n.reshape(-1)
-            flat_n   = flat_n.at[flat_idx].add(val * wx)
-            delta_n  = flat_n.reshape(grid_shape)
-
+    # Normalize by cell volume (convert sum of weights → density perturbation)
+    n_particles = state.weight.shape[0]
+    cell_vol = (geom.r_grid[-1] - geom.r_grid[0]) * 2*jnp.pi * 2*jnp.pi / size
+    delta_n = grid.reshape(grid_shape) / (n_particles * cell_vol + 1e-30)
     return delta_n
 
 
 def gather_from_grid(
     phi: jnp.ndarray,
-    state: GCState,
+    state,
     geom: SAlphaGeometry,
     mi: float,
     e: float,
-    n_gyro: int = 4,
 ) -> tuple:
     """
-    Gather gyroaveraged electric field at particle guiding center positions.
+    Gather E-field at particle positions (trilinear interpolation from phi).
 
-    Computes E = -∇φ by finite differences on the grid, then interpolates
-    to guiding center positions with gyroaveraging.
-
-    Parameters
-    ----------
-    phi   : (Nr, Ntheta, Nzeta) electrostatic potential
-    state : GCState
-    geom  : SAlphaGeometry
-    mi, e : ion mass and charge
-    n_gyro: gyroaverage points
-
-    Returns
-    -------
-    E_r, E_theta, E_zeta : electric field components at particles, shape (N,)
+    Returns E_r, E_theta, E_zeta each shape (N,).
     """
-    Nr, Ntheta, Nzeta = phi.shape
+    from gyrojax.fields.poisson import compute_efield
+    E_r_g, E_th_g, E_ze_g = compute_efield(phi, geom)
 
-    # Compute E = -∇φ via finite differences on the grid
-    dr  = (geom.r_grid[-1]  - geom.r_grid[0])  / (Nr - 1)
-    dth = 2.0 * jnp.pi / Ntheta
-    dze = 2.0 * jnp.pi / Nzeta
-
-    E_r_grid     = -(jnp.roll(phi, -1, axis=0) - jnp.roll(phi, 1, axis=0)) / (2*dr)
-    E_theta_grid = -(jnp.roll(phi, -1, axis=1) - jnp.roll(phi, 1, axis=1)) / (2*dth)
-    E_zeta_grid  = -(jnp.roll(phi, -1, axis=2) - jnp.roll(phi, 1, axis=2)) / (2*dze)
-
-    # Larmor radius
-    B_gc, _, _, _, _ = interp_geometry_to_particles(geom, state.r, state.theta, state.zeta)
-    rho_L = jnp.sqrt(2.0 * state.mu * mi) / (e * B_gc)
-
-    ring_r, ring_th, ring_ze = _larmor_ring_points(
-        state.r, state.theta, state.zeta, rho_L, n_gyro
+    grid_shape = phi.shape
+    i0, i1, j0, j1, k0, k1, wr, wt, wz = _get_trilinear_weights(
+        state.r, state.theta, state.zeta, geom, grid_shape
     )
 
-    E_r_p     = jnp.zeros(state.r.shape[0])
-    E_theta_p = jnp.zeros(state.r.shape[0])
-    E_zeta_p  = jnp.zeros(state.r.shape[0])
+    def trilinear_gather(field):
+        # 8 corners
+        f = (  field[i0, j0, k0] * (1-wr)*(1-wt)*(1-wz)
+             + field[i1, j0, k0] *    wr *(1-wt)*(1-wz)
+             + field[i0, j1, k0] * (1-wr)*   wt *(1-wz)
+             + field[i0, j0, k1] * (1-wr)*(1-wt)*   wz
+             + field[i1, j1, k0] *    wr *   wt *(1-wz)
+             + field[i1, j0, k1] *    wr *(1-wt)*   wz
+             + field[i0, j1, k1] * (1-wr)*   wt *   wz
+             + field[i1, j1, k1] *    wr *   wt *   wz )
+        return f
 
-    def interp_field(field, rk, thk, zek):
-        i0, j0, k0, wr, wt, wz = _trilinear_index_weights(
-            rk, thk, zek, geom, Nr, Ntheta, Nzeta
-        )
-        i1 = (i0 + 1) % Nr
-        j1 = (j0 + 1) % Ntheta
-        k1 = (k0 + 1) % Nzeta
-
-        return (
-            field[i0, j0, k0] * (1-wr)*(1-wt)*(1-wz) +
-            field[i1, j0, k0] *    wr *(1-wt)*(1-wz) +
-            field[i0, j1, k0] * (1-wr)*   wt *(1-wz) +
-            field[i0, j0, k1] * (1-wr)*(1-wt)*   wz  +
-            field[i1, j1, k0] *    wr *   wt *(1-wz) +
-            field[i1, j0, k1] *    wr *(1-wt)*   wz  +
-            field[i0, j1, k1] * (1-wr)*   wt *   wz  +
-            field[i1, j1, k1] *    wr *   wt *   wz
-        )
-
-    for k in range(n_gyro):
-        rk = ring_r[k]; thk = ring_th[k]; zek = ring_ze[k]
-        E_r_p     = E_r_p     + interp_field(E_r_grid,     rk, thk, zek) / n_gyro
-        E_theta_p = E_theta_p + interp_field(E_theta_grid, rk, thk, zek) / n_gyro
-        E_zeta_p  = E_zeta_p  + interp_field(E_zeta_grid,  rk, thk, zek) / n_gyro
-
-    return E_r_p, E_theta_p, E_zeta_p
+    return (
+        trilinear_gather(E_r_g),
+        trilinear_gather(E_th_g),
+        trilinear_gather(E_ze_g),
+    )
