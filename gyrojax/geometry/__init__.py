@@ -1,1 +1,2 @@
 from .salpha import SAlphaGeometry, build_salpha_geometry, interp_geometry_to_particles
+from .field_aligned import FieldAlignedGeometry, build_field_aligned_geometry, interp_fa_to_particles
