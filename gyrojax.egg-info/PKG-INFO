@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: gyrojax
+Version: 0.1.0
+Summary: Delta-f gyrokinetic PIC code for tokamak/stellarator simulation
+Requires-Python: >=3.10
+Requires-Dist: jax
+Requires-Dist: jaxlib
+Requires-Dist: numpy
+Requires-Dist: h5py
+Requires-Dist: matplotlib
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pytest-xdist; extra == "dev"

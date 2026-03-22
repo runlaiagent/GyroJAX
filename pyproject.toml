@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gyrojax"
+version = "0.1.0"
+description = "Delta-f gyrokinetic PIC code for tokamak/stellarator simulation"
+requires-python = ">=3.10"
+dependencies = [
+    "jax",
+    "jaxlib",
+    "numpy",
+    "h5py",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-xdist"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["gyrojax*"]

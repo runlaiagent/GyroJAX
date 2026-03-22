@@ -1,0 +1,9 @@
+jax
+jaxlib
+numpy
+h5py
+matplotlib
+
+[dev]
+pytest
+pytest-xdist
