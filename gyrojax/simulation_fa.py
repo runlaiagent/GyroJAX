@@ -94,48 +94,47 @@ def _interp_q(r: jnp.ndarray, geom: FieldAlignedGeometry) -> jnp.ndarray:
     return geom.q_profile[i0]
 
 
-def run_simulation_fa(
+def _run_with_geom(
     cfg: SimConfigFA,
-    key: jax.random.PRNGKey = None,
+    geom: FieldAlignedGeometry,
+    key: jax.random.PRNGKey,
     verbose: bool = True,
 ) -> tuple:
     """
-    Run a gyrokinetic δf simulation in field-aligned coordinates.
+    Core simulation loop given a pre-built FieldAlignedGeometry.
 
-    Returns
-    -------
-    diags  : list of DiagnosticsFA (length n_steps)
-    state  : final GCState (positions in FA coords: r=ψ, theta=θ, zeta=α)
-    phi    : final electrostatic potential (Npsi, Ntheta, Nalpha)
-    geom   : FieldAlignedGeometry used
+    Used by both run_simulation_fa (s-α) and external callers that supply
+    a VMEC geometry (Phase 2b).
+
+    Returns (diags, state, phi, geom).
     """
-    if key is None:
-        key = jax.random.PRNGKey(42)
+    Npsi   = geom.B_field.shape[0]
+    Ntheta = geom.B_field.shape[1]
+    Nalpha = geom.B_field.shape[2]
 
     if verbose:
         print(f"[GyroJAX FA] {cfg.N_particles:,} particles, "
-              f"grid ({cfg.Npsi},{cfg.Ntheta},{cfg.Nalpha}), "
+              f"grid ({Npsi},{Ntheta},{Nalpha}), "
               f"{cfg.n_steps} steps, dt={cfg.dt}")
 
-    # --- Geometry ---
-    geom = build_field_aligned_geometry(
-        Npsi=cfg.Npsi, Ntheta=cfg.Ntheta, Nalpha=cfg.Nalpha,
-        R0=cfg.R0, a=cfg.a, B0=cfg.B0, q0=cfg.q0, q1=cfg.q1,
-    )
-
     # --- Particle initialization ---
-    # init_maxwellian_particles works in (r, θ, ζ) — convert to (ψ, θ, α)
-    # We reuse the SAlpha geometry dimensions just for particle init
+    # Use s-α geometry with same grid dims for Maxwellian sampling,
+    # then convert positions to FA/VMEC coords.
     from gyrojax.geometry.salpha import build_salpha_geometry
+    r_min  = float(geom.psi_grid[0])
+    r_max  = float(geom.psi_grid[-1])
+    # Build a thin s-α geometry just for particle sampling
     geom_sa = build_salpha_geometry(
-        cfg.Npsi, cfg.Ntheta, cfg.Nalpha,
-        R0=cfg.R0, a=cfg.a, B0=cfg.B0, q0=cfg.q0, q1=cfg.q1,
+        Npsi, Ntheta, Nalpha,
+        R0=geom.R0, a=geom.a, B0=geom.B0,
+        q0=float(geom.q_profile[Npsi//2]),
+        q1=0.0,
     )
     state_sa = init_maxwellian_particles(
         cfg.N_particles, geom_sa, cfg.vti, cfg.Ti, cfg.mi, key
     )
 
-    # Convert particle positions to field-aligned coords: α = ζ - q(r)·θ
+    # Convert positions to FA coords: α = ζ - q(r)·θ
     psi_p, theta_p, alpha_p = salpha_to_fa_coords(
         state_sa.r, state_sa.theta, state_sa.zeta, geom
     )
@@ -150,8 +149,8 @@ def run_simulation_fa(
     pert = pert_amp * jnp.sin(2.0 * state.theta + state.zeta)
     state = state._replace(weight=pert)
 
-    phi = jnp.zeros((cfg.Npsi, cfg.Ntheta, cfg.Nalpha))
-    grid_shape = (cfg.Npsi, cfg.Ntheta, cfg.Nalpha)
+    phi = jnp.zeros((Npsi, Ntheta, Nalpha))
+    grid_shape = (Npsi, Ntheta, Nalpha)
     q_over_m = cfg.e / cfg.mi
     Ln = cfg.R0 / cfg.R0_over_Ln
     LT = cfg.R0 / cfg.R0_over_LT
@@ -197,18 +196,14 @@ def run_simulation_fa(
         d_ln_T_dr  = jnp.full_like(state.r, -1.0 / LT)
         q_at_r_p   = _interp_q(state.r, geom)
 
-        # update_weights uses (E_r, E_theta, ...) — in FA coords:
-        #   E_r  → E_psi   (radial ExB drive: vE_ψ = -E_θ/B)
-        #   E_theta → E_theta (for parallel terms, ≈0 here)
-        # gradB_r → gradB_psi (same radial component)
         state = update_weights(
             state,
-            E_psi_p,    # E_r in weight eq (used as vE_r = -E_th/B, not directly)
-            E_theta_p,  # E_theta for ExB
+            E_psi_p,
+            E_theta_p,
             B_p,
-            gradB_psi_p,   # gradB_r
+            gradB_psi_p,
             gradB_th_p,
-            kappa_psi_p,   # kappa_r
+            kappa_psi_p,
             kappa_th_p,
             q_at_r_p,
             n0_p, T_p,
@@ -227,3 +222,26 @@ def run_simulation_fa(
                   f"|w|_rms={float(w_rms):.3e}")
 
     return diags, state, phi, geom
+
+
+def run_simulation_fa(
+    cfg: SimConfigFA,
+    key: jax.random.PRNGKey = None,
+    verbose: bool = True,
+) -> tuple:
+    """
+    Run a gyrokinetic δf simulation in s-α field-aligned coordinates.
+
+    Builds an analytical s-α FieldAlignedGeometry from cfg parameters,
+    then delegates to _run_with_geom.
+
+    Returns (diags, state, phi, geom).
+    """
+    if key is None:
+        key = jax.random.PRNGKey(42)
+
+    geom = build_field_aligned_geometry(
+        Npsi=cfg.Npsi, Ntheta=cfg.Ntheta, Nalpha=cfg.Nalpha,
+        R0=cfg.R0, a=cfg.a, B0=cfg.B0, q0=cfg.q0, q1=cfg.q1,
+    )
+    return _run_with_geom(cfg, geom, key, verbose=verbose)
