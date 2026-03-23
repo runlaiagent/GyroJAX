@@ -36,6 +36,7 @@ from gyrojax.deltaf.weights import update_weights
 from gyrojax.fields.poisson_fa import solve_poisson_fa, compute_efield_fa
 from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa, gather_from_grid_fa
 from gyrojax.geometry.profiles import build_cbc_profiles, interp_profiles, krook_damping
+from gyrojax.collisions import apply_collisions
 
 
 @dataclass
@@ -74,6 +75,11 @@ class SimConfigFA:
     vpar_cap: float = 4.0
     # Global geometry flag
     use_global: bool = False   # True = global profiles, False = flux-tube
+    # Collision model
+    collision_model: str = 'none'   # 'none' | 'krook' | 'lorentz' | 'dougherty'
+    nu_krook:  float = 0.01         # Krook damping rate
+    nu_ei:     float = 0.01         # e-i collision frequency (Lorentz)
+    nu_coll:   float = 0.01         # Dougherty collision frequency
 
 
 class DiagnosticsFA(NamedTuple):
@@ -247,6 +253,12 @@ def _run_with_geom(
         # Apply Krook damping in buffer zones (global mode only)
         if cfg.use_global and global_profiles is not None:
             state = krook_damping(state, global_profiles, cfg.dt)
+
+        # 6b. Collisions
+        state, key = apply_collisions(state, B_p, cfg, cfg.dt, key)
+
+        # Weight clamp (δf validity)
+        state = state._replace(weight=jnp.clip(state.weight, -10.0, 10.0))
 
         # 6. Diagnostics
         phi_rms = jnp.sqrt(jnp.mean(phi**2))
