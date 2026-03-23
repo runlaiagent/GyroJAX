@@ -117,6 +117,7 @@ def _run_with_geom(
     geom: FieldAlignedGeometry,
     key: jax.random.PRNGKey,
     verbose: bool = True,
+    state0_override=None,
 ) -> tuple:
     """
     Core simulation loop given a pre-built FieldAlignedGeometry.
@@ -166,6 +167,10 @@ def _run_with_geom(
     pert_amp = 1e-4
     pert = pert_amp * jnp.sin(2.0 * state.theta + state.zeta)
     state = state._replace(weight=pert)
+
+    # Allow caller to override the initial state (e.g. for R-H zonal test)
+    if state0_override is not None:
+        state = state0_override
 
     phi = jnp.zeros((Npsi, Ntheta, Nalpha))
     grid_shape = (Npsi, Ntheta, Nalpha)
