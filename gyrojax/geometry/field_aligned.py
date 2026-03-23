@@ -163,10 +163,13 @@ def build_field_aligned_geometry(
     # ∂B/∂ψ = ∂B/∂r  =  -B² cosθ / (B0·R0)
     gradB_psi3 = (-B3**2 * np.cos(th3) / (B0 * R0)).astype(np.float32)
 
-    # ∂B/∂θ  =  B² ε sinθ / B0
-    gradB_th3  = ( B3**2 * eps3 * np.sin(th3) / B0).astype(np.float32)
+    # ∂B/∂θ  =  B² ε sinθ / B0  (angular derivative, dB/dθ per radian)
+    # Physical gradient along field line: dB/dl = dB/dθ / (q*R0)
+    q3 = (q0 + q1 * r3 / a).astype(np.float32)
+    gradB_th3  = ( B3**2 * eps3 * np.sin(th3) / (B0 * q3 * R0)).astype(np.float32)
 
     # Curvature: κ_ψ = -cosθ/R,  κ_θ = sinθ/R
+    # kappa_th = sinθ/R(r) already has units 1/m ✓
     R3 = R0 * (1.0 + eps3 * np.cos(th3))
     kappa_psi3 = (-np.cos(th3) / R3).astype(np.float32)
     kappa_th3  = ( np.sin(th3) / R3).astype(np.float32)

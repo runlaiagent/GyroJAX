@@ -228,6 +228,20 @@ def load_vmec_geometry(
     shat    = (s_sel * dqds / np.maximum(np.abs(q_out), 1e-10)).astype(np.float32)
     twist   = (-2 * np.pi * shat).astype(np.float32)
 
+    # Convert dimensionless kappa/gradB to physical units (1/m):
+    #   kappa_th_dimless = -(1/B) * dB/dtheta   [theta in 0..2pi]
+    #   Physical curvature: kappa_th_phys = kappa_th_dimless / (q * R0)
+    #   (field line arc length = q * R0 * delta_theta)
+    q_3d = q_out[:, None, None] * np.ones_like(B_3d)
+    phys_factor = 1.0 / np.maximum(np.abs(q_3d) * R0, 1e-10)
+
+    kappa_s_phys  = (kappa_s  * phys_factor).astype(np.float32)
+    kappa_th_phys = (kappa_th * phys_factor).astype(np.float32)
+
+    # gradB_th in physical units: (dB/dtheta) / (q*R0)  [B/m]
+    gradB_th_phys = (gradB_th * phys_factor).astype(np.float32)
+    # gradB_s stays in units of B/ds (ds is normalized flux, OK for ψ-coord)
+
     # --- Metric g^{αα} ---
     # In VMEC Boozer coords: g^{αα} ≈ (iota·B/Bref)² + ... 
     # Use same formula as s-α: g^{αα} = (q/r)²(1+ŝ²θ²) but now r=sqrt(s)*a
@@ -240,14 +254,14 @@ def load_vmec_geometry(
     galphaalpha_2d = ((q2d / r2d)**2 * (1.0 + shat2d**2 * (th2d - np.pi)**2)).astype(np.float32)
 
     return FieldAlignedGeometry(
-        psi_grid    = jnp.array(s_sel.astype(np.float32)),
+        psi_grid    = jnp.array((s_sel * a).astype(np.float32)),  # physical r = s*a [m]
         theta_grid  = jnp.array(theta_1d.astype(np.float32)),
         alpha_grid  = jnp.array(zeta_1d.astype(np.float32)),
         B_field     = jnp.array(B_3d),
         gradB_psi   = jnp.array(gradB_s),
-        gradB_th    = jnp.array(gradB_th),
-        kappa_psi   = jnp.array(kappa_s),
-        kappa_th    = jnp.array(kappa_th),
+        gradB_th    = jnp.array(gradB_th_phys),   # physical units [B/m]
+        kappa_psi   = jnp.array(kappa_s_phys),    # physical units [1/m]
+        kappa_th    = jnp.array(kappa_th_phys),   # physical units [1/m]
         gpsipsi     = jnp.ones(Ns_out, dtype=jnp.float32),
         galphaalpha = jnp.array(galphaalpha_2d),
         gpsialpha   = jnp.zeros(Ns_out, dtype=jnp.float32),

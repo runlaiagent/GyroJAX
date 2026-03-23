@@ -27,12 +27,31 @@ WOUT_LI383 = os.path.expanduser(
 
 
 def extract_growth_rate(phi_max_series: np.ndarray, dt: float, window: float = 0.4) -> float:
-    n       = len(phi_max_series)
-    n_start = int(n * (1 - window))
-    t       = np.arange(n_start, n) * dt
-    log_phi = np.log(np.maximum(phi_max_series[n_start:], 1e-20))
-    coeffs  = np.polyfit(t, log_phi, 1)
-    return float(coeffs[0])
+    """Extract growth rate from the LINEAR phase (before saturation)."""
+    n = len(phi_max_series)
+    log_phi = np.log(np.maximum(phi_max_series, 1e-20))
+
+    # Find saturation point: where log|phi| stops growing monotonically
+    # Use a rolling window to find the last point of consistent growth
+    dlog = np.diff(log_phi)
+    # Find the last sustained growing window (5 consecutive positive diffs)
+    sat_idx = n - 1
+    for i in range(len(dlog) - 5, 0, -1):
+        if np.all(dlog[i:i+5] > 0):
+            sat_idx = i + 5
+            break
+
+    # Use the middle portion of the linear phase for fit
+    n_end = min(sat_idx, n - 1)
+    n_start = max(1, int(n_end * 0.3))
+    if n_end - n_start < 5:
+        n_start = max(1, n_end - 20)
+
+    t = np.arange(n_start, n_end) * dt
+    lp = log_phi[n_start:n_end]
+    if len(t) < 3:
+        return 0.0
+    return float(np.polyfit(t, lp, 1)[0])
 
 
 def run_stellarator_itg(quick: bool = False):
@@ -50,11 +69,13 @@ def run_stellarator_itg(quick: bool = False):
     if quick:
         geom = load_vmec_geometry(WOUT_LI383, Ntheta=32, Nzeta=16, Ns_out=16)
         N_particles = 50_000
-        n_steps = 150
+        n_steps = 200
+        dt = 0.03   # smaller dt for stellarator (faster growth)
     else:
         geom = load_vmec_geometry(WOUT_LI383, Ntheta=64, Nzeta=32, Ns_out=32)
         N_particles = 500_000
         n_steps = 400
+        dt = 0.03
 
     Ns, Nth, Nze = geom.B_field.shape
     B0   = float(geom.B0)
@@ -67,15 +88,22 @@ def run_stellarator_itg(quick: bool = False):
 
     dt = 0.05   # R0/vti
     vti = 1.0
+
+    # Compute e = Omega_i * mi / B0 to give rho* = rho_i/a = 1/rho_star_inv
+    # rho_i = vti * mi / (e * B0)  =>  e = vti * mi * rho_star_inv / (a * B0)
+    rho_star_inv = 180.0   # same as CBC: a/rho_i = 180
+    e_vmec = vti * 1.0 * rho_star_inv / (a * B0)
+    print(f"  Computed e = {e_vmec:.1f}  (rho* = 1/{rho_star_inv:.0f}, a={a:.3f}, B0={B0:.3f})")
+
     cfg = SimConfigFA(
         Npsi=Ns, Ntheta=Nth, Nalpha=Nze,
         N_particles=N_particles,
         n_steps=n_steps,
         dt=dt,
         R0=R0, a=a, B0=B0,
-        q0=float(geom.q_profile[Ns//2]),   # mid-radius q
-        q1=0.0,    # VMEC handles q via geometry
-        Ti=1.0, Te=1.0, mi=1.0, e=1000.0,
+        q0=float(geom.q_profile[Ns//2]),
+        q1=0.0,
+        Ti=1.0, Te=1.0, mi=1.0, e=e_vmec,
         R0_over_LT=6.9, R0_over_Ln=2.2,
         vti=vti, n0_avg=1.0,
     )

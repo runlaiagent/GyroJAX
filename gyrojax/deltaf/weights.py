@@ -106,13 +106,13 @@ def _compute_drift_r(
     """
     Omega = q_over_m * B                              # cyclotron frequency
 
-    # ∇B drift radial component: -(μ/mΩ) * ∂B/∂θ / R0
-    # (gradB_th has units of B/length; dividing by R0 gives ~1/R0² scale)
-    v_gradB_r = -(mu / (mi * jnp.maximum(Omega, 1e-10))) * gradB_th / R0
+    # ∇B drift radial component: -(μ/mΩ) * ∂|B|/∂θ_physical
+    # gradB_th has units of B/m (physical gradient, not normalized)
+    v_gradB_r = -(mu / (mi * jnp.maximum(Omega, 1e-10))) * gradB_th
 
-    # Curvature drift radial component: -(v∥²/Ω) * κ_θ / R0
-    # (kappa_th = sin(θ)/R ~ 1/R0; already has 1/R0 units)
-    v_curv_r  = -(vpar**2 / jnp.maximum(Omega, 1e-10)) * kappa_th / R0
+    # Curvature drift radial component: -(v∥²/Ω) * κ_θ
+    # kappa_th has units of 1/m (physical curvature, not normalized)
+    v_curv_r  = -(vpar**2 / jnp.maximum(Omega, 1e-10)) * kappa_th
 
     return v_gradB_r + v_curv_r
 
