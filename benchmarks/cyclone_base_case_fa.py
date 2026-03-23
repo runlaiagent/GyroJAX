@@ -98,29 +98,24 @@ def run_cbc_fa(quick: bool = False):
 
     # Save results
     try:
-        import matplotlib.pyplot as plt
-        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-
-        axes[0].semilogy(t_series, phi_max_series + 1e-20, 'b-', label='|φ|_max')
-        axes[0].semilogy(t_series, phi_rms_series + 1e-20, 'r--', label='|φ|_rms')
-        axes[0].set_xlabel('t [R0/vti]')
-        axes[0].set_ylabel('|φ|')
-        axes[0].set_title('CBC Phase 2a: potential amplitude')
-        axes[0].legend(); axes[0].grid(True, alpha=0.3)
-
-        axes[1].plot(t_series, phi_max_series, 'b-')
-        axes[1].set_xlabel('t [R0/vti]')
-        axes[1].set_ylabel('|φ|_max')
-        axes[1].set_title(f'γ = {gamma:.3f} vti/R0 (target 0.17, err {rel_err:.1%})')
-        axes[1].grid(True, alpha=0.3)
-
-        plt.tight_layout()
-        out_path = os.path.join(os.path.dirname(__file__), 'cbc_fa_result.png')
-        plt.savefig(out_path, dpi=120)
-        print(f"\n  Plot saved: {out_path}")
-        plt.close()
-    except ImportError:
-        pass
+        from gyrojax.viz import plot_dashboard
+        from gyrojax.diagnostics import ion_heat_flux
+        import numpy as np_
+        LT = cfg.R0 / cfg.R0_over_LT
+        Q = ion_heat_flux(state, phi, geom, (cfg.Npsi, cfg.Ntheta, cfg.Nalpha),
+                          cfg.Ti, cfg.n0_avg, LT)
+        out_path = os.path.join(os.path.dirname(__file__), 'cbc_fa_dashboard.png')
+        plot_dashboard(
+            phi_max=phi_max_series, phi_rms=phi_rms_series,
+            dt=cfg.dt, gamma_measured=gamma,
+            phi_final=np_.array(phi), state_final=state, geom=geom,
+            Q_profiles=[np_.array(Q)], t_labels=[f't={len(diags)*cfg.dt:.0f}'],
+            gamma_target=0.17,
+            title=f"GyroJAX CBC Phase 2a  [γ={gamma:.3f}, err={rel_err:.1%}]",
+            save_path=out_path,
+        )
+    except Exception as ex:
+        print(f"  (viz skipped: {ex})")
 
     return {
         't': t_series,
