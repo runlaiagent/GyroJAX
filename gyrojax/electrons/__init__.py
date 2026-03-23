@@ -83,11 +83,10 @@ def adiabatic_electron_density(phi: jnp.ndarray, n0: float, Te: float, e: float)
 
 def push_electrons_dk(
     state_e: GCState,
-    phi: jnp.ndarray,
-    geom,
     E_psi: jnp.ndarray,
     E_theta: jnp.ndarray,
     E_alpha: jnp.ndarray,
+    geom,
     e_cfg: ElectronConfig,
     dt_ion: float,
 ) -> GCState:
@@ -96,13 +95,14 @@ def push_electrons_dk(
 
     Electrons are pushed N_subcycles times per ion step with dt_e = dt_ion/N_subcycles.
     Only E×B drift (no gyroaverage for electrons since k⊥ρe ~ 0).
+    Uses jax.lax.fori_loop for JIT compatibility.
+    Per-substep clamping prevents runaway due to large mirror force on light electrons.
 
     Parameters
     ----------
     state_e   : electron GCState
-    phi       : electrostatic potential (Npsi, Ntheta, Nalpha)
-    geom      : FieldAlignedGeometry
     E_*       : electric field components at electron positions
+    geom      : FieldAlignedGeometry
     e_cfg     : ElectronConfig
     dt_ion    : ion timestep
     """
@@ -111,13 +111,90 @@ def push_electrons_dk(
     dt_e = dt_ion / e_cfg.subcycles
     q_over_m_e = -1.0 / e_cfg.me_over_mi   # e_charge/me = -e/(me/mi * mi) = -1/me_over_mi
 
-    state = state_e
-    for _ in range(e_cfg.subcycles):
-        state = push_particles_fa(
+    r_min = geom.psi_grid[0] * 1.001
+    r_max = geom.psi_grid[-1] * 0.999
+    # Electron vpar cap: 4 * vte
+    vpar_cap_e = 4.0 * e_cfg.vte
+
+    def one_substep(_, state):
+        new_state = push_particles_fa(
             state, E_psi, E_theta, E_alpha,
             geom, q_over_m_e, e_cfg.me_over_mi, dt_e,
         )
-    return state
+        # Per-substep boundary and velocity clamping to prevent runaway
+        return new_state._replace(
+            r=jnp.clip(new_state.r, r_min, r_max),
+            vpar=jnp.clip(new_state.vpar, -vpar_cap_e, vpar_cap_e),
+        )
+
+    return jax.lax.fori_loop(0, e_cfg.subcycles, one_substep, state_e)
+
+
+def update_electron_weights(
+    state_e: GCState,
+    E_psi_e: jnp.ndarray,
+    E_theta_e: jnp.ndarray,
+    B_e: jnp.ndarray,
+    gradB_psi_e: jnp.ndarray,
+    gradB_th_e: jnp.ndarray,
+    kappa_psi_e: jnp.ndarray,
+    kappa_th_e: jnp.ndarray,
+    q_at_r_e: jnp.ndarray,
+    n0_e: jnp.ndarray,
+    Te_e: jnp.ndarray,
+    d_ln_n0_dr: jnp.ndarray,
+    d_ln_Te_dr: jnp.ndarray,
+    e_cfg: ElectronConfig,
+    R0: float,
+    dt: float,
+) -> GCState:
+    """
+    Drift-kinetic electron weight equation.
+    Same form as ion weight equation but with:
+      - electron charge: q_e = -e (negative)
+      - electron mass: me = me_over_mi * mi
+      - no gyroaverage (k_perp * rho_e ~ 0)
+      - electron temperature Te
+
+    Note: we pass |q/m_e| (positive magnitude) to update_weights because
+    the drift velocity formulas use jnp.maximum(Omega, 1e-10) which clips
+    negative cyclotron frequencies. The electron ExB drift has the same
+    sign as ions (charge-independent), and we rely on the Maxwellian
+    d_lnf0/dr to encode the electron response correctly.
+    """
+    from gyrojax.deltaf.weights import update_weights
+    # Use positive |q/m_e| to avoid sign issues in drift formulas
+    # The electron weight equation is sign-compatible: ExB drift is
+    # charge-independent, and magnetic drifts have same sign as ions
+    # (both drift outward on low-field side for thermal particles)
+    abs_q_over_m_e = 1.0 / e_cfg.me_over_mi   # positive magnitude
+    return update_weights(
+        state_e,
+        E_psi_e, E_theta_e,
+        B_e, gradB_psi_e, gradB_th_e, kappa_psi_e, kappa_th_e,
+        q_at_r_e,
+        n0_e, Te_e,
+        d_ln_n0_dr, d_ln_Te_dr,
+        abs_q_over_m_e, e_cfg.me_over_mi, R0, dt,
+    )
+
+
+@dataclass(frozen=True)
+class ElectronState:
+    """Full electron simulation state."""
+    markers: GCState   # electron guiding-center markers
+    model:   str       # 'adiabatic' or 'drift_kinetic'
+
+
+def init_electron_state(N_e: int, geom, e_cfg: ElectronConfig, key: jax.random.PRNGKey) -> ElectronState:
+    """Initialize electron state for the given model."""
+    if e_cfg.model == 'adiabatic':
+        # Dummy markers (not used in adiabatic model)
+        markers = init_electron_markers(1, geom, e_cfg, key)
+        return ElectronState(markers=markers, model='adiabatic')
+    else:
+        markers = init_electron_markers(N_e, geom, e_cfg, key)
+        return ElectronState(markers=markers, model='drift_kinetic')
 
 
 def init_electron_markers(

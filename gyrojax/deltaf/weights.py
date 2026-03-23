@@ -105,14 +105,16 @@ def _compute_drift_r(
     `/R0` is already encoded in the geometry arrays; no extra 1/r factor.
     """
     Omega = q_over_m * B                              # cyclotron frequency
+    # Safe division: preserve sign of Omega (negative for electrons), avoid |Omega|→0
+    Omega_safe = jnp.sign(Omega) * jnp.maximum(jnp.abs(Omega), 1e-10)
 
     # ∇B drift radial component: -(μ/mΩ) * ∂|B|/∂θ_physical
     # gradB_th has units of B/m (physical gradient, not normalized)
-    v_gradB_r = -(mu / (mi * jnp.maximum(Omega, 1e-10))) * gradB_th
+    v_gradB_r = -(mu / (mi * Omega_safe)) * gradB_th
 
     # Curvature drift radial component: -(v∥²/Ω) * κ_θ
     # kappa_th has units of 1/m (physical curvature, not normalized)
-    v_curv_r  = -(vpar**2 / jnp.maximum(Omega, 1e-10)) * kappa_th
+    v_curv_r  = -(vpar**2 / Omega_safe) * kappa_th
 
     return v_gradB_r + v_curv_r
 

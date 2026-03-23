@@ -80,6 +80,11 @@ class SimConfigFA:
     nu_krook:  float = 0.01         # Krook damping rate
     nu_ei:     float = 0.01         # e-i collision frequency (Lorentz)
     nu_coll:   float = 0.01         # Dougherty collision frequency
+    # Electron model
+    electron_model: str = 'adiabatic'   # 'adiabatic' | 'drift_kinetic'
+    me_over_mi:     float = 1.0/1836.0
+    subcycles_e:    int   = 10
+    N_electrons:    int   = 0           # 0 = same as N_particles
 
 
 class DiagnosticsFA(NamedTuple):
@@ -168,6 +173,22 @@ def _run_with_geom(
     Ln = cfg.R0 / cfg.R0_over_Ln
     LT = cfg.R0 / cfg.R0_over_LT
 
+    # --- Electron initialization ---
+    from gyrojax.electrons import (
+        ElectronConfig, ElectronState, init_electron_state,
+        push_electrons_dk, update_electron_weights,
+    )
+    e_cfg = ElectronConfig(
+        model=cfg.electron_model,
+        me_over_mi=cfg.me_over_mi,
+        subcycles=cfg.subcycles_e,
+        Te=cfg.Te,
+        vte=cfg.vti * float(jnp.sqrt(1.0 / cfg.me_over_mi)),
+    )
+    N_e = cfg.N_electrons if cfg.N_electrons > 0 else cfg.N_particles
+    key, ekey = jax.random.split(key)
+    e_state = init_electron_state(N_e, geom, e_cfg, ekey)
+
     # Build global profiles if requested
     global_profiles = None
     if cfg.use_global:
@@ -195,10 +216,19 @@ def _run_with_geom(
         delta_n = scatter_to_grid_fa(state, geom, grid_shape) * cfg.n0_avg
 
         # 2. Solve GK Poisson (exact Γ₀(b))
-        phi = solve_poisson_fa(
-            delta_n, geom,
-            cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e
-        )
+        if cfg.electron_model == 'drift_kinetic':
+            # Use kinetic electron density from previous step
+            delta_n_e_grid = scatter_to_grid_fa(e_state.markers, geom, grid_shape) * cfg.n0_avg
+            from gyrojax.electrons import solve_poisson_with_ke
+            phi = solve_poisson_with_ke(
+                delta_n, delta_n_e_grid, geom,
+                cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e
+            )
+        else:
+            phi = solve_poisson_fa(
+                delta_n, geom,
+                cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e
+            )
 
         # 3. Gather E to particle positions
         E_psi_p, E_theta_p, E_alpha_p = gather_from_grid_fa(phi, state, geom)
@@ -259,6 +289,37 @@ def _run_with_geom(
 
         # Weight clamp (δf validity)
         state = state._replace(weight=jnp.clip(state.weight, -10.0, 10.0))
+
+        # 6c. Electron push and weight update (drift-kinetic model only)
+        if cfg.electron_model == 'drift_kinetic':
+            E_psi_e, E_theta_e, E_alpha_e = gather_from_grid_fa(phi, e_state.markers, geom)
+            new_e_markers = push_electrons_dk(
+                e_state.markers, E_psi_e, E_theta_e, E_alpha_e, geom, e_cfg, cfg.dt
+            )
+            B_e, gBpsi_e, gBth_e, kpsi_e, kth_e = interp_fa_to_particles(
+                geom, new_e_markers.r, new_e_markers.theta, new_e_markers.zeta
+            )
+            if cfg.use_global and global_profiles is not None:
+                n0_e, Te_e_p, _Te_e2, q_e, d_lnn0_e, d_lnTe_e = interp_profiles(global_profiles, new_e_markers.r)
+            else:
+                n0_e, Te_e_p = _get_profiles(new_e_markers.r, cfg)
+                d_lnn0_e = jnp.full_like(new_e_markers.r, -1.0 / Ln)
+                d_lnTe_e = jnp.full_like(new_e_markers.r, -1.0 / LT)
+                q_e = _interp_q(new_e_markers.r, geom)
+            new_e_markers = update_electron_weights(
+                new_e_markers, E_psi_e, E_theta_e,
+                B_e, gBpsi_e, gBth_e, kpsi_e, kth_e,
+                q_e, n0_e, Te_e_p,
+                d_lnn0_e, d_lnTe_e,
+                e_cfg, cfg.R0, cfg.dt,
+            )
+            # Electron boundary clamp + weight clamp
+            new_e_markers = new_e_markers._replace(
+                r=jnp.clip(new_e_markers.r, geom.psi_grid[0]*1.001, geom.psi_grid[-1]*0.999),
+                vpar=jnp.clip(new_e_markers.vpar, -cfg.vpar_cap * e_cfg.vte, cfg.vpar_cap * e_cfg.vte),
+                weight=jnp.clip(new_e_markers.weight, -10.0, 10.0),
+            )
+            e_state = ElectronState(markers=new_e_markers, model='drift_kinetic')
 
         # 6. Diagnostics
         phi_rms = jnp.sqrt(jnp.mean(phi**2))
