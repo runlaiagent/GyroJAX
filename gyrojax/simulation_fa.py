@@ -35,6 +35,7 @@ from gyrojax.particles.guiding_center_fa import push_particles_fa
 from gyrojax.deltaf.weights import update_weights
 from gyrojax.fields.poisson_fa import solve_poisson_fa, compute_efield_fa
 from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa, gather_from_grid_fa
+from gyrojax.geometry.profiles import build_cbc_profiles, interp_profiles, krook_damping
 
 
 @dataclass
@@ -71,6 +72,8 @@ class SimConfigFA:
     R0_over_Ln: float = 2.2
     # Velocity cap (multiples of vti) to prevent runaway particles
     vpar_cap: float = 4.0
+    # Global geometry flag
+    use_global: bool = False   # True = global profiles, False = flux-tube
 
 
 class DiagnosticsFA(NamedTuple):
@@ -159,6 +162,21 @@ def _run_with_geom(
     Ln = cfg.R0 / cfg.R0_over_Ln
     LT = cfg.R0 / cfg.R0_over_LT
 
+    # Build global profiles if requested
+    global_profiles = None
+    if cfg.use_global:
+        global_profiles = build_cbc_profiles(
+            Npsi=Npsi,
+            a=cfg.a,
+            R0=cfg.R0,
+            q0=cfg.q0,
+            q1=cfg.q1,
+            R0_over_LT=cfg.R0_over_LT,
+            R0_over_Ln=cfg.R0_over_Ln,
+            n0_avg=cfg.n0_avg,
+            Ti=cfg.Ti,
+        )
+
     diags: List[DiagnosticsFA] = []
 
     for step in range(cfg.n_steps):
@@ -199,10 +217,17 @@ def _run_with_geom(
         B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p = interp_fa_to_particles(
             geom, state.r, state.theta, state.zeta
         )
-        n0_p, T_p = _get_profiles(state.r, cfg)
-        d_ln_n0_dr = jnp.full_like(state.r, -1.0 / Ln)
-        d_ln_T_dr  = jnp.full_like(state.r, -1.0 / LT)
-        q_at_r_p   = _interp_q(state.r, geom)
+        if cfg.use_global and global_profiles is not None:
+            # Global mode: per-particle profiles from radial interpolation
+            n0_p, T_p, _Te_p, q_at_r_p, d_ln_n0_dr, d_ln_T_dr = interp_profiles(
+                global_profiles, state.r
+            )
+        else:
+            # Flux-tube mode: constant-gradient profiles (original behavior)
+            n0_p, T_p = _get_profiles(state.r, cfg)
+            d_ln_n0_dr = jnp.full_like(state.r, -1.0 / Ln)
+            d_ln_T_dr  = jnp.full_like(state.r, -1.0 / LT)
+            q_at_r_p   = _interp_q(state.r, geom)
 
         state = update_weights(
             state,
@@ -218,6 +243,10 @@ def _run_with_geom(
             d_ln_n0_dr, d_ln_T_dr,
             q_over_m, cfg.mi, cfg.R0, cfg.dt,
         )
+
+        # Apply Krook damping in buffer zones (global mode only)
+        if cfg.use_global and global_profiles is not None:
+            state = krook_damping(state, global_profiles, cfg.dt)
 
         # 6. Diagnostics
         phi_rms = jnp.sqrt(jnp.mean(phi**2))
