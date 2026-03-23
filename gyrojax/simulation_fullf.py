@@ -52,7 +52,7 @@ class SimConfigFullF:
     Ti:  float = 1.0
     Te:  float = 1.0
     mi:  float = 1.0
-    e:   float = 1.0
+    e:   float = 1000.0   # Omega_i*mi/B0; CBC rho*=1/180 -> Omega=1000
     vti: float = 1.0
     n0_avg: float = 1.0
     # Profiles
@@ -194,11 +194,14 @@ def run_simulation_fullf(
     for step in range(cfg.n_steps):
 
         # 1. Scatter markers → density; compute δn = n - n0
-        n_markers = scatter_to_grid_fa(state, geom, grid_shape)
-        # scatter_to_grid_fa returns normalized density (markers/vol/N)
-        # Scale to physical units: multiply by n0_avg
-        n_phys = n_markers * cfg.n0_avg * cfg.N_particles
-        delta_n = n_phys - n0_grid
+        # scatter_to_grid_fa returns dimensionless counts/cell (arbitrary norm).
+        # Normalize so uniform distribution → mean=1, then compute δn in n0 units.
+        raw_n = scatter_to_grid_fa(state, geom, grid_shape)
+        mean_n = jnp.mean(raw_n) + 1e-30
+        n_norm = raw_n / mean_n                   # dimensionless, uniform→1
+        # Background density profile (normalized to 1 at midpoint)
+        n0_norm = n0_grid / cfg.n0_avg            # (Npsi,Ntheta,Nalpha), ~1
+        delta_n = (n_norm - n0_norm) * cfg.n0_avg  # physical δn
 
         # 2. Solve GK Poisson with δn
         phi = solve_poisson_fa(

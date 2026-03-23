@@ -93,17 +93,26 @@ def _compute_drift_r(
     """
     Radial magnetic drift velocity vd_r = v_gradB_r + v_curv_r.
 
-    This is the drift that drives ITG when dotted with ∂ln(f0)/∂r.
+    Standard GC drift (in physical units):
+      v_gradB = (μ/mΩ) · (b̂ × ∇B)/B
+      v_curv  = (v∥²/Ω) · (b̂ × κ)
+
+    Radial (ψ) component in field-aligned / s-α coords:
+      vd_r = -(μ/mΩ)·gradB_th/R  - (v∥²/Ω)·kappa_th/R
+    where R ~ q*R0/r * r = q*R0 is the connection length scale.
+
+    With kappa_th = sin(θ)/R(r) and gradB_th ~ sin(θ)·ε/R0, the
+    `/R0` is already encoded in the geometry arrays; no extra 1/r factor.
     """
     Omega = q_over_m * B                              # cyclotron frequency
-    prefac_grad = (mu / (mi * jnp.maximum(Omega, 1e-10)))
-    prefac_curv = (vpar**2 / jnp.maximum(Omega, 1e-10))
 
-    # ∇B drift radial component: -(μ/mΩ) * ∂B/∂θ / r
-    v_gradB_r = -prefac_grad * gradB_th / jnp.maximum(r, 1e-6)
+    # ∇B drift radial component: -(μ/mΩ) * ∂B/∂θ / R0
+    # (gradB_th has units of B/length; dividing by R0 gives ~1/R0² scale)
+    v_gradB_r = -(mu / (mi * jnp.maximum(Omega, 1e-10))) * gradB_th / R0
 
-    # Curvature drift radial component: -(v∥²/Ω) * κ_θ / r
-    v_curv_r  = -prefac_curv * kappa_th / jnp.maximum(r, 1e-6)
+    # Curvature drift radial component: -(v∥²/Ω) * κ_θ / R0
+    # (kappa_th = sin(θ)/R ~ 1/R0; already has 1/R0 units)
+    v_curv_r  = -(vpar**2 / jnp.maximum(Omega, 1e-10)) * kappa_th / R0
 
     return v_gradB_r + v_curv_r
 

@@ -75,7 +75,7 @@ def run_stellarator_itg(quick: bool = False):
         R0=R0, a=a, B0=B0,
         q0=float(geom.q_profile[Ns//2]),   # mid-radius q
         q1=0.0,    # VMEC handles q via geometry
-        Ti=1.0, Te=1.0, mi=1.0, e=1.0,
+        Ti=1.0, Te=1.0, mi=1.0, e=1000.0,
         R0_over_LT=6.9, R0_over_Ln=2.2,
         vti=vti, n0_avg=1.0,
     )

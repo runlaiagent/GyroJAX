@@ -116,8 +116,11 @@ def solve_poisson_fa(
     # (We divide out n₀·e/Te which cancels in (Te/e)·δn/n₀ form)
     op = (Te / Ti) * (1.0 - G0) + rho_i_sq * kperp_sq
 
-    # Avoid division by zero at (0,0,0) mode — fix gauge φ̄ = 0
-    op = op.at[0, 0, 0].set(1.0)
+    # Zero-out all purely parallel modes (kperp=0, kth≠0) — these have op≈0
+    # and cannot be constrained by GK Poisson. Set phi=0 for these modes.
+    # Also zero the (0,0,0) mean mode to fix gauge.
+    kperp_zero = (kperp_sq < 1e-10)   # (Npsi, Ntheta, Nalpha)
+    op = jnp.where(kperp_zero, 1.0, op)   # avoid /0; will zero phi_hat below
 
     # FFT of RHS: (Te/n₀e) * δn
     delta_n_hat = jnp.fft.fftn(delta_n.astype(jnp.complex64))
@@ -125,7 +128,8 @@ def solve_poisson_fa(
 
     # Solve
     phi_hat = rhs_hat / op
-    phi_hat = phi_hat.at[0, 0, 0].set(0.0 + 0j)   # zero mean
+    # Zero out all kperp=0 modes in phi (parallel modes undetermined by GK Poisson)
+    phi_hat = jnp.where(kperp_zero, 0.0 + 0j, phi_hat)
 
     phi = jnp.fft.ifftn(phi_hat).real
     return phi

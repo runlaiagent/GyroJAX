@@ -42,7 +42,7 @@ def run_cbc_fa(quick: bool = False):
             dt=0.05,
             R0=1.0, a=0.18, B0=1.0,
             q0=1.4, q1=0.5,
-            Ti=1.0, Te=1.0, mi=1.0, e=1.0,
+            Ti=1.0, Te=1.0, mi=1.0, e=1000.0,
             R0_over_LT=6.9, R0_over_Ln=2.2,
             vti=1.0, n0_avg=1.0,
         )
@@ -55,7 +55,7 @@ def run_cbc_fa(quick: bool = False):
             dt=0.05,
             R0=1.0, a=0.18, B0=1.0,
             q0=1.4, q1=0.5,
-            Ti=1.0, Te=1.0, mi=1.0, e=1.0,
+            Ti=1.0, Te=1.0, mi=1.0, e=1000.0,
             R0_over_LT=6.9, R0_over_Ln=2.2,
             vti=1.0, n0_avg=1.0,
         )

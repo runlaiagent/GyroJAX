@@ -59,7 +59,11 @@ class SimConfigFA:
     Ti:  float = 1.0
     Te:  float = 1.0
     mi:  float = 1.0
-    e:   float = 1.0
+    # e is the charge-to-mass ratio factor; set e = Omega_i*mi/B0 for proper
+    # gyroradius ordering.  CBC standard: rho* = rho_i/a = 1/180 ->
+    # Omega_i = vti/rho_i = vti * (a/rho_i) / a = 1 * 180 / 0.18 = 1000
+    # => e = Omega_i * mi / B0 = 1000 * 1 / 1 = 1000
+    e:   float = 1000.0
     vti: float = 1.0
     n0_avg: float = 1.0
     # CBC profiles
@@ -159,8 +163,12 @@ def _run_with_geom(
 
     for step in range(cfg.n_steps):
 
-        # 1. Scatter δf → δn
-        delta_n = scatter_to_grid_fa(state, geom, grid_shape)
+        # 1. Scatter δf weights → δn on grid
+        # In δf PIC: δn(x) = Σ_p w_p·f0(X_p)·δ(x-X_p) ≈ n0·(Σ_p w_p·δ(x-X_p)) / N_cell
+        # scatter_to_grid_fa accumulates weight values per cell, normalized by N*vol.
+        # The result is in units of [weight/volume] ∝ δn/n0.
+        # Multiply by n0_avg to get physical δn.
+        delta_n = scatter_to_grid_fa(state, geom, grid_shape) * cfg.n0_avg
 
         # 2. Solve GK Poisson (exact Γ₀(b))
         phi = solve_poisson_fa(
