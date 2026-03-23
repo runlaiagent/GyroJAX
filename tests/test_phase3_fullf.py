@@ -115,7 +115,7 @@ class TestFullFResampling:
         )
         cfg = SimConfigFullF(N_particles=N)
         geom = build_field_aligned_geometry(16, 32, 16, 1.0, 0.18, 1.0)
-        new_state, _ = _resample_particles(state, geom, cfg, key)
+        new_state, _ = _resample_particles(state, cfg, key)
 
         W_new = new_state.weight
         assert float(jnp.std(W_new)) < 1e-5, "Resampled weights should be equal"
