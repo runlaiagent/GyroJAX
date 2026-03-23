@@ -60,7 +60,8 @@ class SimConfigFullF:
     Ti:  float = 1.0
     Te:  float = 1.0
     mi:  float = 1.0
-    e:   float = 1000.0   # Omega_i*mi/B0; CBC rho*=1/180 -> Omega=1000
+    rho_star: float = 1.0 / 180.0  # rho_i/a; CBC standard
+    e:   float = 1000.0   # = 1/rho_star * vti*mi/(a*B0); Omega_i*mi/B0; CBC rho*=1/180 -> Omega=1000
     vti: float = 1.0
     n0_avg: float = 1.0
     # Profiles

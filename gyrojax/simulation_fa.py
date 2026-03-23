@@ -59,10 +59,10 @@ class SimConfigFA:
     Ti:  float = 1.0
     Te:  float = 1.0
     mi:  float = 1.0
-    # e is the charge-to-mass ratio factor; set e = Omega_i*mi/B0 for proper
-    # gyroradius ordering.  CBC standard: rho* = rho_i/a = 1/180 ->
-    # Omega_i = vti/rho_i = vti * (a/rho_i) / a = 1 * 180 / 0.18 = 1000
-    # => e = Omega_i * mi / B0 = 1000 * 1 / 1 = 1000
+    # rho_star = rho_i / a = 1/180 for CBC (standard gyrokinetic ordering)
+    rho_star: float = 1.0 / 180.0
+    # e is the charge-to-mass ratio factor = 1/rho_star * vti*mi/(a*B0)
+    # CBC: Omega_i = vti/(rho_star*a) = 1/(1/180*0.18) = 1000 => e=1000
     e:   float = 1000.0
     vti: float = 1.0
     n0_avg: float = 1.0
