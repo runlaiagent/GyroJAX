@@ -82,6 +82,8 @@ def print_report(peak: dict, spectrum: list, rh: dict, git_hash: str):
     print(f"\n{'='*W}")
     print(f"  GyroJAX Production Validation Report")
     print(f"  Git: {git_hash}   Date: {date}")
+    print(f"  Devices: {jax.devices()}")
+    print(f"  JAX version: {jax.__version__}")
     print(f"{'='*W}")
 
     # Section 1

@@ -118,6 +118,7 @@ def _run_with_geom(
     key: jax.random.PRNGKey,
     verbose: bool = True,
     state0_override=None,
+    scatter_fn=None,   # optional override: fn(state, geom, grid_shape) -> delta_n
 ) -> tuple:
     """
     Core simulation loop given a pre-built FieldAlignedGeometry.
@@ -164,7 +165,8 @@ def _run_with_geom(
     )
 
     # Seed ITG perturbation: w = ε·sin(m·θ + n·α)  (m=2, n=1)
-    pert_amp = 1e-4
+    # Normalize amplitude to keep δn/n0 constant across particle counts
+    pert_amp = 1e-4 / float(jnp.sqrt(cfg.N_particles / 50_000))
     pert = pert_amp * jnp.sin(2.0 * state.theta + state.zeta)
     state = state._replace(weight=pert)
 
@@ -218,7 +220,10 @@ def _run_with_geom(
         # scatter_to_grid_fa accumulates weight values per cell, normalized by N*vol.
         # The result is in units of [weight/volume] ∝ δn/n0.
         # Multiply by n0_avg to get physical δn.
-        delta_n = scatter_to_grid_fa(state, geom, grid_shape) * cfg.n0_avg
+        if scatter_fn is not None:
+            delta_n = scatter_fn(state, geom, grid_shape) * cfg.n0_avg
+        else:
+            delta_n = scatter_to_grid_fa(state, geom, grid_shape) * cfg.n0_avg
 
         # 2. Solve GK Poisson (exact Γ₀(b))
         if cfg.electron_model == 'drift_kinetic':
@@ -335,6 +340,18 @@ def _run_with_geom(
         if verbose and step % 50 == 0:
             print(f"  step {step:4d}/{cfg.n_steps}  |φ|_max={float(phi_max):.3e}  "
                   f"|w|_rms={float(w_rms):.3e}")
+
+        # NaN early stopping
+        if jnp.any(jnp.isnan(phi)) or jnp.any(jnp.isinf(phi)):
+            if verbose:
+                print(f"  ⚠️  NaN/Inf detected at step {step}, stopping early")
+            break
+
+        # Weight explosion warning
+        weight_rms_warn = 5.0
+        if float(w_rms) > weight_rms_warn:
+            if verbose:
+                print(f"  ⚠️  weight_rms={float(w_rms):.3e} > {weight_rms_warn} at step {step}, possible blow-up")
 
     return diags, state, phi, geom
 
