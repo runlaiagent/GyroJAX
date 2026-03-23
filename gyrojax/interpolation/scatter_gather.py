@@ -84,9 +84,9 @@ def scatter_to_grid(
     i0, i1, j0, j1, k0, k1, wr, wt, wz = _get_trilinear_weights(
         state.r, state.theta, state.zeta, geom, grid_shape
     )
-    val = state.weight.astype(jnp.float32)
+    val = state.weight.astype(jnp.float64)
     size = Nr * Ntheta * Nzeta
-    grid = jnp.zeros(size, dtype=jnp.float32)
+    grid = jnp.zeros(size, dtype=jnp.float64)
 
     # 8 corners (vectorized at-scatter, no Python loops in hot path)
     grid = _scatter_one_corner(grid, i0, j0, k0, val*(1-wr)*(1-wt)*(1-wz), grid_shape)
@@ -101,7 +101,7 @@ def scatter_to_grid(
     # Normalize by cell volume (convert sum of weights → density perturbation)
     n_particles = state.weight.shape[0]
     cell_vol = (geom.r_grid[-1] - geom.r_grid[0]) * 2*jnp.pi * 2*jnp.pi / size
-    delta_n = grid.reshape(grid_shape) / (n_particles * cell_vol + 1e-30)
+    delta_n = (grid.reshape(grid_shape) / (n_particles * cell_vol + 1e-30)).astype(jnp.float32)
     return delta_n
 
 

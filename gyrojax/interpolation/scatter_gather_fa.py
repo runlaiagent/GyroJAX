@@ -83,9 +83,12 @@ def scatter_to_grid_fa(
     i0, i1, j0, j1, k0, k1, wp, wt, wa = _trilinear_weights_fa(
         state.r, state.theta, state.zeta, geom, grid_shape
     )
-    val  = state.weight.astype(jnp.float32)
+    # Use float64 accumulator to avoid precision loss with large N_particles.
+    # float32 has ~7 significant digits; 1M particles × weight~0.1 per cell
+    # accumulates ~1e4 adds per cell, losing ~4 digits of precision.
+    val  = state.weight.astype(jnp.float64)
     size = Npsi * Ntheta * Nalpha
-    grid = jnp.zeros(size, dtype=jnp.float32)
+    grid = jnp.zeros(size, dtype=jnp.float64)
 
     def add_corner(g, ii, jj, kk, w):
         flat = ii * (Ntheta * Nalpha) + jj * Nalpha + kk
@@ -102,7 +105,7 @@ def scatter_to_grid_fa(
 
     n_particles = state.weight.shape[0]
     cell_vol = (geom.psi_grid[-1] - geom.psi_grid[0]) * 2*jnp.pi * 2*jnp.pi / size
-    delta_n = grid.reshape(grid_shape) / (n_particles * cell_vol + 1e-30)
+    delta_n = (grid.reshape(grid_shape) / (n_particles * cell_vol + 1e-30)).astype(jnp.float32)
     return delta_n
 
 
