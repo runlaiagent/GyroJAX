@@ -1,0 +1,229 @@
+"""
+GyroJAX Phase 2a simulation loop — field-aligned coordinates.
+
+Uses:
+  - FieldAlignedGeometry  (ψ, θ, α) grid aligned with B
+  - Full Γ₀(b) GK Poisson solver (exact FLR, not Padé)
+  - Field-aligned guiding-center pusher (RK4)
+  - Twist-and-shift scatter/gather
+
+Time loop order:
+  1. Scatter δf weights → δn on (ψ, θ, α) grid
+  2. Solve GK Poisson [exact Γ₀(b)]: δn → φ
+  3. Compute E = -∇φ on grid
+  4. Gather E to particle positions (trilinear)
+  5. Push guiding centers (RK4) in FA coords
+  6. Update δf weights (weight equation with ∇B + curvature drives)
+  7. Diagnostics
+"""
+
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import NamedTuple, List
+
+import jax
+import jax.numpy as jnp
+
+from gyrojax.geometry.field_aligned import (
+    FieldAlignedGeometry,
+    build_field_aligned_geometry,
+    interp_fa_to_particles,
+    salpha_to_fa_coords,
+)
+from gyrojax.particles.guiding_center import GCState, init_maxwellian_particles
+from gyrojax.particles.guiding_center_fa import push_particles_fa
+from gyrojax.deltaf.weights import update_weights
+from gyrojax.fields.poisson_fa import solve_poisson_fa, compute_efield_fa
+from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa, gather_from_grid_fa
+
+
+@dataclass
+class SimConfigFA:
+    """Simulation configuration for field-aligned (Phase 2a) run."""
+    # Grid
+    Npsi:   int = 32
+    Ntheta: int = 64
+    Nalpha: int = 32
+    # Particles
+    N_particles: int = 200_000
+    # Time
+    n_steps: int = 500
+    dt:      float = 0.05        # normalized to R0/vti
+    # Geometry
+    R0:  float = 1.0
+    a:   float = 0.18
+    B0:  float = 1.0
+    q0:  float = 1.4
+    q1:  float = 0.5
+    # Physics
+    Ti:  float = 1.0
+    Te:  float = 1.0
+    mi:  float = 1.0
+    e:   float = 1.0
+    vti: float = 1.0
+    n0_avg: float = 1.0
+    # CBC profiles
+    R0_over_LT: float = 6.9
+    R0_over_Ln: float = 2.2
+    # Velocity cap (multiples of vti) to prevent runaway particles
+    vpar_cap: float = 4.0
+
+
+class DiagnosticsFA(NamedTuple):
+    phi_rms:    jnp.ndarray
+    phi_max:    jnp.ndarray
+    weight_rms: jnp.ndarray
+
+
+def _get_profiles(r: jnp.ndarray, cfg: SimConfigFA):
+    """Gaussian density and temperature profiles (CBC-style)."""
+    Ln   = cfg.R0 / cfg.R0_over_Ln
+    LT   = cfg.R0 / cfg.R0_over_LT
+    r_mid = cfg.a * 0.5
+    n0 = cfg.n0_avg * jnp.exp(-(r - r_mid) / Ln)
+    T  = cfg.Ti     * jnp.exp(-(r - r_mid) / LT)
+    return n0, T
+
+
+def _interp_q(r: jnp.ndarray, geom: FieldAlignedGeometry) -> jnp.ndarray:
+    """Linear interpolation of safety factor at particle positions."""
+    Nr  = geom.psi_grid.shape[0]
+    dr  = (geom.psi_grid[-1] - geom.psi_grid[0]) / (Nr - 1)
+    ir  = jnp.clip((r - geom.psi_grid[0]) / dr, 0.0, Nr - 1.001)
+    i0  = jnp.floor(ir).astype(jnp.int32)
+    return geom.q_profile[i0]
+
+
+def run_simulation_fa(
+    cfg: SimConfigFA,
+    key: jax.random.PRNGKey = None,
+    verbose: bool = True,
+) -> tuple:
+    """
+    Run a gyrokinetic δf simulation in field-aligned coordinates.
+
+    Returns
+    -------
+    diags  : list of DiagnosticsFA (length n_steps)
+    state  : final GCState (positions in FA coords: r=ψ, theta=θ, zeta=α)
+    phi    : final electrostatic potential (Npsi, Ntheta, Nalpha)
+    geom   : FieldAlignedGeometry used
+    """
+    if key is None:
+        key = jax.random.PRNGKey(42)
+
+    if verbose:
+        print(f"[GyroJAX FA] {cfg.N_particles:,} particles, "
+              f"grid ({cfg.Npsi},{cfg.Ntheta},{cfg.Nalpha}), "
+              f"{cfg.n_steps} steps, dt={cfg.dt}")
+
+    # --- Geometry ---
+    geom = build_field_aligned_geometry(
+        Npsi=cfg.Npsi, Ntheta=cfg.Ntheta, Nalpha=cfg.Nalpha,
+        R0=cfg.R0, a=cfg.a, B0=cfg.B0, q0=cfg.q0, q1=cfg.q1,
+    )
+
+    # --- Particle initialization ---
+    # init_maxwellian_particles works in (r, θ, ζ) — convert to (ψ, θ, α)
+    # We reuse the SAlpha geometry dimensions just for particle init
+    from gyrojax.geometry.salpha import build_salpha_geometry
+    geom_sa = build_salpha_geometry(
+        cfg.Npsi, cfg.Ntheta, cfg.Nalpha,
+        R0=cfg.R0, a=cfg.a, B0=cfg.B0, q0=cfg.q0, q1=cfg.q1,
+    )
+    state_sa = init_maxwellian_particles(
+        cfg.N_particles, geom_sa, cfg.vti, cfg.Ti, cfg.mi, key
+    )
+
+    # Convert particle positions to field-aligned coords: α = ζ - q(r)·θ
+    psi_p, theta_p, alpha_p = salpha_to_fa_coords(
+        state_sa.r, state_sa.theta, state_sa.zeta, geom
+    )
+    state = GCState(
+        r=psi_p, theta=theta_p, zeta=alpha_p,
+        vpar=state_sa.vpar, mu=state_sa.mu,
+        weight=jnp.zeros(cfg.N_particles, dtype=jnp.float32),
+    )
+
+    # Seed ITG perturbation: w = ε·sin(m·θ + n·α)  (m=2, n=1)
+    pert_amp = 1e-4
+    pert = pert_amp * jnp.sin(2.0 * state.theta + state.zeta)
+    state = state._replace(weight=pert)
+
+    phi = jnp.zeros((cfg.Npsi, cfg.Ntheta, cfg.Nalpha))
+    grid_shape = (cfg.Npsi, cfg.Ntheta, cfg.Nalpha)
+    q_over_m = cfg.e / cfg.mi
+    Ln = cfg.R0 / cfg.R0_over_Ln
+    LT = cfg.R0 / cfg.R0_over_LT
+
+    diags: List[DiagnosticsFA] = []
+
+    for step in range(cfg.n_steps):
+
+        # 1. Scatter δf → δn
+        delta_n = scatter_to_grid_fa(state, geom, grid_shape)
+
+        # 2. Solve GK Poisson (exact Γ₀(b))
+        phi = solve_poisson_fa(
+            delta_n, geom,
+            cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e
+        )
+
+        # 3. Gather E to particle positions
+        E_psi_p, E_theta_p, E_alpha_p = gather_from_grid_fa(phi, state, geom)
+
+        # 4. Push guiding centers (RK4)
+        state = push_particles_fa(
+            state, E_psi_p, E_theta_p, E_alpha_p,
+            geom, q_over_m, cfg.mi, cfg.dt
+        )
+
+        # Radial boundary clamp (absorbing wall)
+        state = state._replace(
+            r=jnp.clip(state.r, geom.psi_grid[0]*1.001, geom.psi_grid[-1]*0.999)
+        )
+
+        # Velocity cap (δf validity)
+        state = state._replace(
+            vpar=jnp.clip(state.vpar, -cfg.vpar_cap * cfg.vti, cfg.vpar_cap * cfg.vti)
+        )
+
+        # 5. Update δf weights
+        B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p = interp_fa_to_particles(
+            geom, state.r, state.theta, state.zeta
+        )
+        n0_p, T_p = _get_profiles(state.r, cfg)
+        d_ln_n0_dr = jnp.full_like(state.r, -1.0 / Ln)
+        d_ln_T_dr  = jnp.full_like(state.r, -1.0 / LT)
+        q_at_r_p   = _interp_q(state.r, geom)
+
+        # update_weights uses (E_r, E_theta, ...) — in FA coords:
+        #   E_r  → E_psi   (radial ExB drive: vE_ψ = -E_θ/B)
+        #   E_theta → E_theta (for parallel terms, ≈0 here)
+        # gradB_r → gradB_psi (same radial component)
+        state = update_weights(
+            state,
+            E_psi_p,    # E_r in weight eq (used as vE_r = -E_th/B, not directly)
+            E_theta_p,  # E_theta for ExB
+            B_p,
+            gradB_psi_p,   # gradB_r
+            gradB_th_p,
+            kappa_psi_p,   # kappa_r
+            kappa_th_p,
+            q_at_r_p,
+            n0_p, T_p,
+            d_ln_n0_dr, d_ln_T_dr,
+            q_over_m, cfg.mi, cfg.R0, cfg.dt,
+        )
+
+        # 6. Diagnostics
+        phi_rms = jnp.sqrt(jnp.mean(phi**2))
+        phi_max = jnp.max(jnp.abs(phi))
+        w_rms   = jnp.sqrt(jnp.mean(state.weight**2))
+        diags.append(DiagnosticsFA(phi_rms=phi_rms, phi_max=phi_max, weight_rms=w_rms))
+
+        if verbose and step % 50 == 0:
+            print(f"  step {step:4d}/{cfg.n_steps}  |φ|_max={float(phi_max):.3e}  "
+                  f"|w|_rms={float(w_rms):.3e}")
+
+    return diags, state, phi, geom
