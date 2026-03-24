@@ -16,6 +16,7 @@ Usage:
 """
 
 import sys, os, argparse, subprocess, datetime
+import gc
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -68,6 +69,8 @@ def run_cbc_peak(quick: bool) -> dict:
         )
     key = jax.random.PRNGKey(0)
     diags, _, _, _ = run_simulation_fa(cfg, key, verbose=False)
+    jax.clear_caches()
+    gc.collect()
     phi_max = np.array([float(d.phi_max) for d in diags])
     gamma, step_start, step_end = extract_growth_rate_smart(phi_max, cfg.dt)
     error = abs(gamma - TARGET_PEAK) / TARGET_PEAK * 100

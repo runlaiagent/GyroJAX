@@ -15,6 +15,7 @@ Usage:
 """
 
 import sys, os, argparse
+import gc
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -104,6 +105,8 @@ def run_spectrum(quick: bool = True) -> list:
         )
         key = jax.random.PRNGKey(42 + k_mode)
         diags, _, _, _ = run_simulation_fa(cfg, key, verbose=False)
+        jax.clear_caches()
+        gc.collect()
         gamma = extract_growth_rate([float(d.phi_max) for d in diags], cfg.dt)
         error = abs(gamma - ref_gamma) / ref_gamma * 100 if ref_gamma > 0 else float('nan')
         flag  = '✅' if error < 25 else '⚠️ '
