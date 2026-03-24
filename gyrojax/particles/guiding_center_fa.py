@@ -75,44 +75,40 @@ def _gc_rhs_fa_batched(
     return dpsi_dt, dtheta_dt, dalpha_dt, dvpar_dt
 
 
-@partial(jax.jit, static_argnames=('q_over_m', 'mi', 'dt'))
+@partial(jax.jit, static_argnames=('q_over_m', 'mi', 'dt', 'R0'))
 def push_particles_fa(
     state: GCState,
     E_psi: jnp.ndarray,
     E_theta: jnp.ndarray,
     E_alpha: jnp.ndarray,
-    geom: FieldAlignedGeometry,
+    B: jnp.ndarray,
+    gBpsi: jnp.ndarray,
+    gBth: jnp.ndarray,
+    kpsi_geom: jnp.ndarray,
+    kth_geom: jnp.ndarray,
+    q_at_psi: jnp.ndarray,   # pre-interpolated
     q_over_m: float,
     mi: float,
     dt: float,
+    R0: float,
 ) -> GCState:
     """
     Push all particles one timestep in field-aligned coords using RK4.
 
-    Geometry interpolation is done once for all particles (batched),
-    then the RK4 arithmetic is pure per-particle vmap.
+    Geometry must be pre-interpolated by the caller (avoids redundant interp).
 
     Parameters
     ----------
     state    : GCState with (ψ, θ, α, v∥, μ, w) for N particles
     E_psi, E_theta, E_alpha : E-field at particle positions, shape (N,)
-    geom     : FieldAlignedGeometry
+    B, gBpsi, gBth, kpsi_geom, kth_geom : pre-interpolated geometry, shape (N,)
+    q_at_psi : safety factor at particle positions, shape (N,)
     q_over_m : e/m
     mi       : ion mass
     dt       : timestep
+    R0       : major radius
     """
-    # Pre-interpolate geometry for all particles at once (avoids vmap over dynamic indexing)
-    B, gBpsi, gBth, kpsi, kth = interp_fa_to_particles(
-        geom, state.r, state.theta, state.zeta
-    )
-
-    # Interpolate q(ψ) for all particles
-    Nr = geom.psi_grid.shape[0]
-    dr = (geom.psi_grid[-1] - geom.psi_grid[0]) / (Nr - 1)
-    ir = jnp.clip((state.r - geom.psi_grid[0]) / dr, 0.0, Nr - 1.001)
-    q_at_psi = geom.q_profile[jnp.floor(ir).astype(jnp.int32)]
-
-    R0 = geom.R0
+    kpsi, kth = kpsi_geom, kth_geom
 
     def rhs_at(psi_, theta_, alpha_, vpar_):
         return _gc_rhs_fa_batched(

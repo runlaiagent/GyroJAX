@@ -258,6 +258,15 @@ def _run_with_geom(
         def step_fn(carry, _):
             state, phi = carry
 
+            # Interpolate geometry ONCE at current positions
+            B_p, gBpsi_p, gBth_p, kpsi_p, kth_p = interp_fa_to_particles(
+                geom, state.r, state.theta, state.zeta
+            )
+            Nr = geom.psi_grid.shape[0]
+            dr = (geom.psi_grid[-1] - geom.psi_grid[0]) / (Nr - 1)
+            ir = jnp.clip((state.r - geom.psi_grid[0]) / dr, 0.0, Nr - 1.001)
+            q_at_r_p = geom.q_profile[jnp.floor(ir).astype(jnp.int32)]
+
             # 1. scatter
             if scatter_fn is not None:
                 delta_n = scatter_fn(state, geom, _gs) * cfg.n0_avg
@@ -270,8 +279,12 @@ def _run_with_geom(
             # 3. gather E
             E_psi_p, E_theta_p, E_alpha_p = gather_from_grid_fa(phi, state, geom)
 
-            # 4. push particles
-            state = push_particles_fa(state, E_psi_p, E_theta_p, E_alpha_p, geom, q_over_m, cfg.mi, cfg.dt)
+            # 4. push — using geometry at current (pre-push) positions
+            state = push_particles_fa(
+                state, E_psi_p, E_theta_p, E_alpha_p,
+                B_p, gBpsi_p, gBth_p, kpsi_p, kth_p, q_at_r_p,
+                q_over_m, cfg.mi, cfg.dt, geom.R0,
+            )
 
             # 5. clamp r and vpar
             state = state._replace(
@@ -279,19 +292,17 @@ def _run_with_geom(
                 vpar=jnp.clip(state.vpar, -cfg.vpar_cap * cfg.vti, cfg.vpar_cap * cfg.vti),
             )
 
-            # 6. update weights
-            B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p = interp_fa_to_particles(
-                geom, state.r, state.theta, state.zeta
-            )
+            # 6. update weights — use SAME geometry (at pre-push positions, standard δf PIC)
             n0_p, T_p = _get_profiles(state.r, cfg)
             d_ln_n0_dr = jnp.full_like(state.r, -1.0 / Ln)
             d_ln_T_dr  = jnp.full_like(state.r, -1.0 / LT)
-            q_at_r_p   = _interp_q(state.r, geom)
 
             state = update_weights(
-                state, E_psi_p, E_theta_p, B_p, gradB_psi_p, gradB_th_p,
-                kappa_psi_p, kappa_th_p, q_at_r_p, n0_p, T_p,
-                d_ln_n0_dr, d_ln_T_dr, q_over_m, cfg.mi, cfg.R0, cfg.dt,
+                state, E_psi_p, E_theta_p,
+                B_p, gBpsi_p, gBth_p, kpsi_p, kth_p,
+                q_at_r_p, n0_p, T_p,
+                d_ln_n0_dr, d_ln_T_dr,
+                q_over_m, cfg.mi, cfg.R0, cfg.dt,
             )
 
             # 7. diagnostics
@@ -310,6 +321,7 @@ def _run_with_geom(
         if verbose:
             print(f"[GyroJAX FA scan] JIT-compiling {cfg.n_steps} steps...")
         (state, phi), diags_stacked = jax.lax.scan(step_fn, (state, phi), None, length=cfg.n_steps)
+        jax.block_until_ready((state.r, phi, diags_stacked.phi_max))
         if verbose:
             phi_arr = diags_stacked.phi_max
             print(f"  Done. phi_max: {float(phi_arr[0]):.3e} → {float(phi_arr[-1]):.3e}")
@@ -352,10 +364,17 @@ def _run_with_geom(
         # 3. Gather E to particle positions
         E_psi_p, E_theta_p, E_alpha_p = gather_from_grid_fa(phi, state, geom)
 
+        # Pre-interpolate geometry at current positions
+        B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p = interp_fa_to_particles(
+            geom, state.r, state.theta, state.zeta
+        )
+        q_at_r_p = _interp_q(state.r, geom)
+
         # 4. Push guiding centers (RK4)
         state = push_particles_fa(
             state, E_psi_p, E_theta_p, E_alpha_p,
-            geom, q_over_m, cfg.mi, cfg.dt
+            B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p, q_at_r_p,
+            q_over_m, cfg.mi, cfg.dt, geom.R0,
         )
 
         # Radial boundary clamp (absorbing wall)
@@ -369,9 +388,6 @@ def _run_with_geom(
         )
 
         # 5. Update δf weights
-        B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p = interp_fa_to_particles(
-            geom, state.r, state.theta, state.zeta
-        )
         if cfg.use_global and global_profiles is not None:
             # Global mode: per-particle profiles from radial interpolation
             n0_p, T_p, _Te_p, q_at_r_p, d_ln_n0_dr, d_ln_T_dr = interp_profiles(

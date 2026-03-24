@@ -159,15 +159,12 @@ def compute_efield_fa(
 
     phi_hat = jnp.fft.fftn(phi.astype(jnp.complex64))
 
-    E_psi_hat  = -1j * KPSI * phi_hat
-    E_th_hat   = -1j * KTH  * phi_hat
-    E_al_hat   = -1j * KAL  * phi_hat
+    # Stack k-vectors and do one batched ifftn: shape (3, Npsi, Ntheta, Nalpha)
+    K_stack = jnp.stack([-KPSI, -KTH, -KAL], axis=0)   # (3, Npsi, Ntheta, Nalpha)
+    E_hat_stack = 1j * K_stack * phi_hat[None]           # broadcast phi_hat
+    E_stack = jnp.fft.ifftn(E_hat_stack, axes=(-3, -2, -1)).real  # ifftn over last 3 axes
 
-    E_psi  = jnp.fft.ifftn(E_psi_hat).real
-    E_th   = jnp.fft.ifftn(E_th_hat ).real
-    E_al   = jnp.fft.ifftn(E_al_hat ).real
-
-    return E_psi, E_th, E_al
+    return E_stack[0], E_stack[1], E_stack[2]
 
 
 def gyroaverage_phi(
