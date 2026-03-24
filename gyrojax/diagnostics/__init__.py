@@ -227,12 +227,12 @@ def extract_growth_rate_smart(phi_max: np.ndarray, dt: float) -> tuple:
         return float(max(c[0], 0.0)), 0, n
 
     # Physics-based time bounds for CBC ITG:
-    # - With small pert_amp (1e-4), transient noise lasts until t~5
-    # - Linear phase: t=5-20 (clear exponential growth)
-    # - Saturation: phi_max > 0.05 typically
-    t_skip       = 5.0    # skip initialization noise
-    t_max_linear = 30.0   # hard cap
-    sat_threshold = 5e-2  # phi_max above this → nonlinear
+    # - With pert_amp=1e-4, initial burst ends at t~3
+    # - Clean linear phase: t=3-9 (before nonlinear explosion)
+    # - Saturation: phi_max > 4e-2 (mode explosion at t~9-10)
+    t_skip       = 3.0    # skip initialization burst
+    t_max_linear = 20.0   # hard cap
+    sat_threshold = 4e-2  # phi_max above this → nonlinear explosion
 
     step_skip = max(3, int(t_skip / dt))
     step_max  = min(n, int(t_max_linear / dt))
@@ -267,8 +267,20 @@ def extract_growth_rate_smart(phi_max: np.ndarray, dt: float) -> tuple:
     log_window = log_phi[step_skip:n_end]
     n_win = len(log_window)
 
-    # Sliding window fit within the linear phase window
-    win = max(10, n_win // 3)
+    if n_win < 5:
+        n0, n1 = n // 4, 3 * n // 4
+        t = np.arange(n0, n1) * dt
+        c = np.polyfit(t, log_phi[n0:n1], 1)
+        return float(max(c[0], 0.0)), n0, n1
+
+    # Primary method: simple linear regression over the full linear window
+    # This is most robust when the window is correctly identified
+    t_full = np.arange(step_skip, n_end) * dt
+    c_full = np.polyfit(t_full, log_phi[step_skip:n_end], 1)
+    gamma_full = float(c_full[0])
+
+    # Also try sliding window to find the most stable segment
+    win = max(8, n_win // 3)
     slopes = []
     slope_starts = []
     for i in range(0, n_win - win):
@@ -277,51 +289,32 @@ def extract_growth_rate_smart(phi_max: np.ndarray, dt: float) -> tuple:
         slopes.append(c[0])
         slope_starts.append(step_skip + i)
 
-    slopes = np.array(slopes)
-    slope_starts = np.array(slope_starts)
-
-    if len(slopes) == 0:
-        t_full = np.arange(step_skip, n_end) * dt
-        c = np.polyfit(t_full, log_phi[step_skip:n_end], 1)
-        return float(max(c[0], 0.0)), step_skip, n_end
+    slopes = np.array(slopes) if slopes else np.array([gamma_full])
+    slope_starts = np.array(slope_starts) if slope_starts else np.array([step_skip])
 
     # Filter: physically plausible ITG growth rates
     mask = (slopes > 0.005) & (slopes < 0.5)
     if mask.sum() < 3:
         mask = (slopes > 0.0) & (slopes < 1.0)
 
+    if mask.sum() == 0:
+        return float(max(gamma_full, 0.0)), step_skip, n_end
+
     filtered_slopes = slopes[mask]
     filtered_starts = slope_starts[mask]
 
-    if len(filtered_slopes) == 0:
-        t_full = np.arange(step_skip, n_end) * dt
-        c = np.polyfit(t_full, log_phi[step_skip:n_end], 1)
-        return float(max(c[0], 0.0)), step_skip, n_end
+    # Take median of filtered slopes — robust to outliers
+    best_gamma = float(np.median(filtered_slopes))
+    best_start = int(filtered_starts[len(filtered_starts)//2])
+    best_end   = min(best_start + win, n_end)
 
-    # Find the most stable (lowest CV) segment
-    best_gamma = 0.0
-    best_start, best_end = int(filtered_starts[0]), n_end
-    best_score = float('inf')
-
-    seg_win = max(3, len(filtered_slopes) // 3)
-    for i in range(len(filtered_slopes) - seg_win + 1):
-        seg = filtered_slopes[i:i+seg_win]
-        mean_s = float(seg.mean())
-        if mean_s > 0.005:
-            cv = float(seg.std()) / (mean_s + 1e-10)
-            if cv < best_score:
-                best_score = cv
-                best_gamma = mean_s
-                best_start = int(filtered_starts[i])
-                best_end   = min(int(filtered_starts[i]) + seg_win + win, n_end)
-
-    if best_gamma == 0.0:
-        t_full = np.arange(step_skip, n_end) * dt
-        c = np.polyfit(t_full, log_phi[step_skip:n_end], 1)
-        best_gamma = float(max(c[0], 0.0))
+    # Use whichever is more conservative (closer to full-window fit)
+    # This prevents picking an outlier peak
+    if abs(gamma_full) > 0.005 and abs(best_gamma - gamma_full) > 0.5 * abs(gamma_full):
+        best_gamma = gamma_full
         best_start, best_end = step_skip, n_end
 
-    return best_gamma, best_start, best_end
+    return float(max(best_gamma, 0.0)), best_start, best_end
 
 
 def extract_mode_frequency(
