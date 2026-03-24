@@ -201,87 +201,113 @@ def extract_growth_rate_smart(phi_max: np.ndarray, dt: float) -> tuple:
     """
     Find the clean linear growth phase automatically.
 
+    Physics constraints for CBC ITG:
+    - Transient lasts until t ~ 5 R0/vti  (skip first t < t_skip)
+    - Linear phase ends at saturation: phi_max grows beyond ~1e-2
+    - Linear phase ends in time at t ~ 25 R0/vti at most
+    - Valid growth rates: 0.01 < γ < 0.45 vti/R0
+
     Method:
-    1. Skip initial transient (first 15% of steps)
-    2. Compute local slope d(log|φ|)/dt in sliding windows
-    3. Filter out unphysically fast slopes (>0.5 vti/R0 for ITG)
-    4. Find the segment where slope is positive and most stable (low CV)
-    5. Return γ = mean slope in that segment, plus (step_start, step_end)
+    1. Skip initial transient: t < t_skip (default 5 R0/vti)
+    2. Cap at saturation onset: first step where phi_max > sat_threshold
+       OR t > t_max_linear (default 25 R0/vti)
+    3. Within that window, run sliding-window linear fits
+    4. Find most stable (lowest CV) segment with positive γ
 
     Returns: (gamma, step_start, step_end)
     """
-    arr = np.array(phi_max)
-    arr = np.maximum(arr, 1e-20)
+    arr = np.array(phi_max, dtype=np.float64)
+    arr = np.maximum(arr, 1e-30)
     log_phi = np.log(arr)
     n = len(log_phi)
 
     if n < 10:
-        # Too short: fallback
         t = np.arange(n) * dt
         c = np.polyfit(t, log_phi, 1)
         return float(max(c[0], 0.0)), 0, n
 
-    # Skip initial transient (first 25% — noise-driven phase for CBC lasts ~150 steps)
-    skip = max(10, n // 4)
+    # Physics-based time bounds
+    t_skip       = 5.0   # skip initial transient
+    t_max_linear = 25.0  # linear phase can't last past this
+    sat_threshold = 5e-2  # phi_max above this → nonlinear saturation
 
-    # Sliding window linear fit
-    win = max(20, n // 10)
+    step_skip = max(5, int(t_skip / dt))
+    step_max  = min(n, int(t_max_linear / dt))
+
+    # Find saturation onset: first step (after skip) where phi_max > threshold
+    sat_step = step_max
+    for i in range(step_skip, n):
+        if arr[i] > sat_threshold:
+            sat_step = i
+            break
+
+    n_end = min(step_max, sat_step)
+
+    if n_end - step_skip < 15:
+        # Window too short: relax constraints slightly
+        step_skip = max(3, step_skip // 2)
+        n_end = min(n, int(35.0 / dt))
+        n_end = max(n_end, step_skip + 15)
+
+    log_window = log_phi[step_skip:n_end]
+    n_win = len(log_window)
+
+    if n_win < 10:
+        # Last resort fallback
+        n0, n1 = n // 4, 3 * n // 4
+        t = np.arange(n0, n1) * dt
+        c = np.polyfit(t, log_phi[n0:n1], 1)
+        return float(max(c[0], 0.0)), n0, n1
+
+    # Sliding window fit within the linear phase window
+    win = max(15, n_win // 4)
     slopes = []
     slope_starts = []
-    for i in range(skip, n - win):
-        t = np.arange(win) * dt
-        c = np.polyfit(t, log_phi[i:i+win], 1)
+    for i in range(0, n_win - win):
+        t_seg = np.arange(win) * dt
+        c = np.polyfit(t_seg, log_window[i:i+win], 1)
         slopes.append(c[0])
-        slope_starts.append(i)
+        slope_starts.append(step_skip + i)
+
     slopes = np.array(slopes)
     slope_starts = np.array(slope_starts)
 
-    if len(slopes) == 0:
-        t = np.arange(n) * dt
-        c = np.polyfit(t, log_phi, 1)
-        return float(max(c[0], 0.0)), 0, n
-
-    # Filter: keep only physically plausible ITG slopes (0.01 < γ < 0.5)
-    mask = (slopes > 0.01) & (slopes < 0.5)
+    # Filter: physically plausible ITG growth rates
+    mask = (slopes > 0.005) & (slopes < 0.45)
     if mask.sum() < 5:
-        # Relax upper bound if no valid slopes found
-        mask = (slopes > 0.0) & (slopes < 1.0)
+        mask = (slopes > 0.0) & (slopes < 0.6)
 
     filtered_slopes = slopes[mask]
     filtered_starts = slope_starts[mask]
 
     if len(filtered_slopes) == 0:
-        # Fallback: use middle third
-        n0, n1 = n // 3, 2 * n // 3
-        t = np.arange(n0, n1) * dt
-        c = np.polyfit(t, log_phi[n0:n1], 1)
-        return float(max(c[0], 0.0)), n0, n1
+        # No valid window found — fit the entire linear window
+        t_full = np.arange(step_skip, n_end) * dt
+        c = np.polyfit(t_full, log_phi[step_skip:n_end], 1)
+        return float(max(c[0], 0.0)), step_skip, n_end
 
-    # Find segment with most stable (lowest CV) positive slopes
+    # Find segment with most stable (lowest CV) positive slope
     best_gamma = 0.0
-    best_start, best_end = skip, n
+    best_start, best_end = int(filtered_starts[0]), n_end
     best_score = float('inf')
 
-    seg_win = max(10, len(filtered_slopes) // 4)
-    for i in range(len(filtered_slopes) - seg_win):
+    seg_win = max(5, len(filtered_slopes) // 3)
+    for i in range(len(filtered_slopes) - seg_win + 1):
         seg = filtered_slopes[i:i+seg_win]
-        mean_s = seg.mean()
-        if mean_s > 0.01:
-            cv = seg.std() / (mean_s + 1e-10)
+        mean_s = float(seg.mean())
+        if mean_s > 0.005:
+            cv = float(seg.std()) / (mean_s + 1e-10)
             if cv < best_score:
                 best_score = cv
-                best_gamma = float(mean_s)
+                best_gamma = mean_s
                 best_start = int(filtered_starts[i])
-                best_end   = min(int(filtered_starts[i]) + seg_win + win, n)
+                best_end   = min(int(filtered_starts[i]) + seg_win + win, n_end)
 
     if best_gamma == 0.0:
-        # Fallback: use middle third after skip
-        n0, n1 = (n + skip) // 2, 3 * n // 4
-        n0 = max(n0, skip)
-        t = np.arange(n0, n1) * dt
-        c = np.polyfit(t, log_phi[n0:n1], 1)
+        t_full = np.arange(step_skip, n_end) * dt
+        c = np.polyfit(t_full, log_phi[step_skip:n_end], 1)
         best_gamma = float(max(c[0], 0.0))
-        best_start, best_end = n0, n1
+        best_start, best_end = step_skip, n_end
 
     return best_gamma, best_start, best_end
 
