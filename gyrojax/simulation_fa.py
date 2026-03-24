@@ -220,6 +220,106 @@ def _run_with_geom(
             Ti=cfg.Ti,
         )
 
+    # ------------------------------------------------------------------ #
+    # Fast path: lax.scan for adiabatic electrons, flux-tube, no collisions
+    # ------------------------------------------------------------------ #
+    use_scan = (
+        cfg.electron_model == 'adiabatic' and
+        not cfg.use_global and
+        cfg.collision_model == 'none'
+    )
+
+    if use_scan:
+        class _DiagsList:
+            """Wraps stacked DiagnosticsFA to behave like a list of DiagnosticsFA namedtuples."""
+            def __init__(self, stacked: DiagnosticsFA):
+                self._s = stacked
+                self._n = int(stacked.phi_max.shape[0])
+            def __len__(self): return self._n
+            def __iter__(self):
+                for i in range(self._n):
+                    yield DiagnosticsFA(
+                        phi_rms=self._s.phi_rms[i], phi_max=self._s.phi_max[i],
+                        weight_rms=self._s.weight_rms[i],
+                        phi_zonal_rms=self._s.phi_zonal_rms[i],
+                        phi_zonal_mid=self._s.phi_zonal_mid[i],
+                    )
+            def __getitem__(self, i):
+                return DiagnosticsFA(
+                    phi_rms=self._s.phi_rms[i], phi_max=self._s.phi_max[i],
+                    weight_rms=self._s.weight_rms[i],
+                    phi_zonal_rms=self._s.phi_zonal_rms[i],
+                    phi_zonal_mid=self._s.phi_zonal_mid[i],
+                )
+
+        # Materialize grid_shape as plain Python ints so lax.scan sees static values
+        _gs = (int(Npsi), int(Ntheta), int(Nalpha))
+
+        def step_fn(carry, _):
+            state, phi = carry
+
+            # 1. scatter
+            if scatter_fn is not None:
+                delta_n = scatter_fn(state, geom, _gs) * cfg.n0_avg
+            else:
+                delta_n = scatter_to_grid_fa(state, geom, _gs) * cfg.n0_avg
+
+            # 2. solve poisson
+            phi = solve_poisson_fa(delta_n, geom, cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e)
+
+            # 3. gather E
+            E_psi_p, E_theta_p, E_alpha_p = gather_from_grid_fa(phi, state, geom)
+
+            # 4. push particles
+            state = push_particles_fa(state, E_psi_p, E_theta_p, E_alpha_p, geom, q_over_m, cfg.mi, cfg.dt)
+
+            # 5. clamp r and vpar
+            state = state._replace(
+                r=jnp.clip(state.r, geom.psi_grid[0]*1.001, geom.psi_grid[-1]*0.999),
+                vpar=jnp.clip(state.vpar, -cfg.vpar_cap * cfg.vti, cfg.vpar_cap * cfg.vti),
+            )
+
+            # 6. update weights
+            B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p = interp_fa_to_particles(
+                geom, state.r, state.theta, state.zeta
+            )
+            n0_p, T_p = _get_profiles(state.r, cfg)
+            d_ln_n0_dr = jnp.full_like(state.r, -1.0 / Ln)
+            d_ln_T_dr  = jnp.full_like(state.r, -1.0 / LT)
+            q_at_r_p   = _interp_q(state.r, geom)
+
+            state = update_weights(
+                state, E_psi_p, E_theta_p, B_p, gradB_psi_p, gradB_th_p,
+                kappa_psi_p, kappa_th_p, q_at_r_p, n0_p, T_p,
+                d_ln_n0_dr, d_ln_T_dr, q_over_m, cfg.mi, cfg.R0, cfg.dt,
+            )
+
+            # 7. diagnostics
+            phi_rms       = jnp.sqrt(jnp.mean(phi**2))
+            phi_max       = jnp.max(jnp.abs(phi))
+            w_rms         = jnp.sqrt(jnp.mean(state.weight**2))
+            phi_zonal     = phi.mean(axis=(1, 2))
+            phi_zonal_rms = jnp.sqrt(jnp.mean(phi_zonal**2))
+            phi_zonal_mid = phi_zonal[phi_zonal.shape[0] // 2]
+
+            diag = DiagnosticsFA(phi_rms=phi_rms, phi_max=phi_max, weight_rms=w_rms,
+                                 phi_zonal_rms=phi_zonal_rms, phi_zonal_mid=phi_zonal_mid)
+
+            return (state, phi), diag
+
+        if verbose:
+            print(f"[GyroJAX FA scan] JIT-compiling {cfg.n_steps} steps...")
+        (state, phi), diags_stacked = jax.lax.scan(step_fn, (state, phi), None, length=cfg.n_steps)
+        if verbose:
+            phi_arr = diags_stacked.phi_max
+            print(f"  Done. phi_max: {float(phi_arr[0]):.3e} → {float(phi_arr[-1]):.3e}")
+            print(f"  weight_rms final: {float(diags_stacked.weight_rms[-1]):.3e}")
+        diags = _DiagsList(diags_stacked)
+        return diags, state, phi, geom
+
+    # ------------------------------------------------------------------ #
+    # Fallback: Python for-loop (all other modes)
+    # ------------------------------------------------------------------ #
     diags: List[DiagnosticsFA] = []
 
     for step in range(cfg.n_steps):

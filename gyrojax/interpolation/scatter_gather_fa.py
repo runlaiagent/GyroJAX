@@ -19,6 +19,7 @@ All operations fully vectorized — no Python for-loops.
 """
 
 from __future__ import annotations
+import functools
 import jax
 import jax.numpy as jnp
 from gyrojax.geometry.field_aligned import FieldAlignedGeometry, interp_fa_to_particles
@@ -68,7 +69,7 @@ def _trilinear_weights_fa(
     return i0, i1, j0, j1, k0, k1, wp, wt, wa
 
 
-@jax.jit
+@functools.partial(jax.jit, static_argnums=(2,))
 def scatter_to_grid_fa(
     state,
     geom: FieldAlignedGeometry,
