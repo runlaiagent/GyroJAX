@@ -76,7 +76,7 @@ class SimConfigFA:
     # Global geometry flag
     use_global: bool = False   # True = global profiles, False = flux-tube
     # Perturbation seeding
-    pert_amp: float = 1e-2          # perturbation amplitude (ballooning seed)
+    pert_amp: float = 1e-4          # perturbation amplitude — small enough for clean linear phase
     zonal_init: bool = False        # if True, seed zonal flow (k_theta=0) for R-H/GAM tests
     k_mode: int = 1                 # binormal mode number n for ITG seed: sin(2θ + n·α)
     # Collision model

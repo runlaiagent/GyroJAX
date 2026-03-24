@@ -227,12 +227,12 @@ def extract_growth_rate_smart(phi_max: np.ndarray, dt: float) -> tuple:
         return float(max(c[0], 0.0)), 0, n
 
     # Physics-based time bounds for CBC ITG:
-    # - Transient lasts ~t=1-2 (particle initialization noise)
-    # - Linear phase: t=2-8 (phi grows exponentially)
-    # - Saturation onset: phi_max > sat_threshold OR t > t_max_linear
-    t_skip       = 2.0    # skip initialization noise
-    t_max_linear = 15.0   # linear phase ends well before this
-    sat_threshold = 3e-2  # phi_max above this → entering nonlinear
+    # - With small pert_amp (1e-4), transient noise lasts until t~5
+    # - Linear phase: t=5-20 (clear exponential growth)
+    # - Saturation: phi_max > 0.05 typically
+    t_skip       = 5.0    # skip initialization noise
+    t_max_linear = 30.0   # hard cap
+    sat_threshold = 5e-2  # phi_max above this → nonlinear
 
     step_skip = max(3, int(t_skip / dt))
     step_max  = min(n, int(t_max_linear / dt))
