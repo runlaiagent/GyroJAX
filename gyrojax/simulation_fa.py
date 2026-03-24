@@ -76,7 +76,7 @@ class SimConfigFA:
     # Global geometry flag
     use_global: bool = False   # True = global profiles, False = flux-tube
     # Perturbation seeding
-    pert_amp: float = 1e-3          # perturbation amplitude (larger → less noise transient)
+    pert_amp: float = 1e-2          # perturbation amplitude (ballooning seed)
     zonal_init: bool = False        # if True, seed zonal flow (k_theta=0) for R-H/GAM tests
     k_mode: int = 1                 # binormal mode number n for ITG seed: sin(2θ + n·α)
     # Collision model
@@ -175,8 +175,41 @@ def _run_with_geom(
         # Zonal flow: depends only on r (ψ), uniform in θ and α — for R-H / GAM tests
         pert = cfg.pert_amp * jnp.cos(2.0 * jnp.pi * state.r / cfg.a)
     else:
-        # ITG seed: w = ε·sin(m·θ + n·α)  (m=2, n=k_mode)
-        pert = cfg.pert_amp * jnp.sin(2.0 * state.theta + cfg.k_mode * state.zeta)
+        # ITG ballooning seed: proper resonant eigenmode structure
+        #
+        # The ITG mode is a ballooning mode with:
+        #   - Toroidal mode number n = k_mode
+        #   - Resonant poloidal mode m = round(n * q_mid)
+        #   - Ballooning structure: peaks at outboard midplane θ=0,
+        #     decays as exp(-θ²/θ_bal²) away from it
+        #   - In field-aligned coords (ψ, θ, α): the mode is cos(n·α)
+        #     modulated by the ballooning envelope in θ
+        #
+        # Correct ITG ballooning seed:
+        #   w = A · exp(-θ²/θ_bal²) · exp(-((r-r_mid)/r_w)²) · sin(m·θ + n·α)
+        #
+        # where:
+        #   n = k_mode  (toroidal mode number)
+        #   m = round(n * q_mid)  (resonant poloidal mode: k_∥ = 0 condition)
+        #   θ_bal = π/2  (ballooning width — typical for CBC ITG)
+        #
+        # The m·θ + n·α phase makes the seed resonate with the unstable eigenmode.
+        # In field-aligned coords α = ζ - q(r)·θ, so m·θ + n·α = (m - n·q)·θ + n·ζ.
+        # At r = r_mid, q = q_mid → m - n·q_mid ≈ 0 (resonance condition).
+        # Away from r_mid the phase wraps, which is correct for a radially localized mode.
+        n         = cfg.k_mode
+        q_mid     = cfg.q0 + cfg.q1 * 0.25   # q at r = a/2
+        m_res     = int(round(float(n * q_mid)))  # resonant m
+
+        theta_bal = jnp.pi / 2.0
+        balloon   = jnp.exp(-(state.theta**2) / (2.0 * theta_bal**2))
+
+        r_mid   = cfg.a * 0.5
+        r_width = cfg.a * 0.25
+        radial  = jnp.exp(-((state.r - r_mid)**2) / (2.0 * r_width**2))
+
+        phase = m_res * state.theta + n * state.zeta
+        pert  = cfg.pert_amp * balloon * radial * jnp.sin(phase)
     state = state._replace(weight=pert)
 
     # Allow caller to override the initial state (e.g. for R-H zonal test)
