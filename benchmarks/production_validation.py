@@ -45,7 +45,7 @@ def _worker_cbc_peak(quick: bool):
             R0=1.0, a=0.18, B0=1.0, q0=1.4, q1=0.5,
             Ti=1.0, Te=1.0, mi=1.0, e=1000.0, vti=1.0, n0_avg=1.0,
             R0_over_LT=6.9, R0_over_Ln=2.2, vpar_cap=4.0,
-            k_mode=35, single_mode=True,
+            k_mode=18, single_mode=True,  # ky·ρi = 18*1.525/90 ≈ 0.305
         )
     else:
         cfg = SimConfigFA(
@@ -54,7 +54,7 @@ def _worker_cbc_peak(quick: bool):
             R0=1.0, a=0.18, B0=1.0, q0=1.4, q1=0.5,
             Ti=1.0, Te=1.0, mi=1.0, e=1000.0, vti=1.0, n0_avg=1.0,
             R0_over_LT=6.9, R0_over_Ln=2.2, vpar_cap=4.0,
-            k_mode=35, single_mode=True,
+            k_mode=18, single_mode=True,  # ky·ρi ≈ 0.305
         )
 
     diags, _, _, _ = run_simulation_fa(cfg, jax.random.PRNGKey(0), verbose=True)
@@ -72,19 +72,22 @@ def _worker_spectrum(quick: bool):
     from gyrojax.diagnostics import extract_growth_rate_smart
     from benchmarks.gamma_spectrum import estimate_ky_rho, DIMITS_REF
 
-    a, q0, q1, rho_star = 0.18, 1.4, 0.5, 1.0/180.0
+    a, q0, q1 = 0.18, 1.4, 0.5
+    r_ref = a * 0.5
+    rho_i = 1.0 / 1000.0
+    rho_i_over_r_ref = rho_i / r_ref   # ≈ 1/90 (correct normalization)
     q_ref = q0 + q1 * 0.5**2
 
     if quick:
-        k_modes = [12, 24, 35, 47, 59]
+        k_modes = [6, 12, 18, 24, 30]      # ky·ρi ≈ 0.10, 0.20, 0.30, 0.40, 0.51
         N_particles, n_steps, Nalpha = 200_000, 500, 64
     else:
-        k_modes = [6, 12, 18, 24, 35, 47, 59, 71]
+        k_modes = [6, 12, 18, 24, 30, 35, 41, 47]
         N_particles, n_steps, Nalpha = 400_000, 600, 96
 
     results = []
     for k_mode in k_modes:
-        ky_rho = estimate_ky_rho(k_mode, q_ref, rho_star)
+        ky_rho = estimate_ky_rho(k_mode, q_ref, rho_i_over_r_ref)
         closest_ky = min(DIMITS_REF.keys(), key=lambda k: abs(k - ky_rho))
         ref_gamma  = DIMITS_REF[closest_ky]
 
