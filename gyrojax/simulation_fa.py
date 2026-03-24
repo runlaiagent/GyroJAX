@@ -33,7 +33,7 @@ from gyrojax.geometry.field_aligned import (
 from gyrojax.particles.guiding_center import GCState, init_maxwellian_particles
 from gyrojax.particles.guiding_center_fa import push_particles_fa
 from gyrojax.deltaf.weights import update_weights
-from gyrojax.fields.poisson_fa import solve_poisson_fa, compute_efield_fa
+from gyrojax.fields.poisson_fa import solve_poisson_fa, compute_efield_fa, filter_single_mode
 from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa, gather_from_grid_fa
 from gyrojax.geometry.profiles import build_cbc_profiles, interp_profiles, krook_damping
 from gyrojax.collisions import apply_collisions
@@ -79,6 +79,7 @@ class SimConfigFA:
     pert_amp: float = 1e-4          # perturbation amplitude — small enough for clean linear phase
     zonal_init: bool = False        # if True, seed zonal flow (k_theta=0) for R-H/GAM tests
     k_mode: int = 1                 # binormal mode number n for ITG seed: sin(2θ + n·α)
+    single_mode: bool = False       # if True, project phi to ±k_mode after each Poisson solve (linear benchmark mode)
     # Collision model
     collision_model: str = 'none'   # 'none' | 'krook' | 'lorentz' | 'dougherty'
     nu_krook:  float = 0.01         # Krook damping rate
@@ -308,6 +309,9 @@ def _run_with_geom(
 
             # 2. solve poisson
             phi = solve_poisson_fa(delta_n, geom, cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e)
+            # Optional: project to single mode for linear benchmark
+            if cfg.single_mode:
+                phi = filter_single_mode(phi, cfg.k_mode)
 
             # 3. gather E
             E_psi_p, E_theta_p, E_alpha_p = gather_from_grid_fa(phi, state, geom)
@@ -393,6 +397,8 @@ def _run_with_geom(
                 delta_n, geom,
                 cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e
             )
+        if cfg.single_mode:
+            phi = filter_single_mode(phi, cfg.k_mode)
 
         # 3. Gather E to particle positions
         E_psi_p, E_theta_p, E_alpha_p = gather_from_grid_fa(phi, state, geom)

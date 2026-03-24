@@ -45,7 +45,7 @@ def _worker_cbc_peak(quick: bool):
             R0=1.0, a=0.18, B0=1.0, q0=1.4, q1=0.5,
             Ti=1.0, Te=1.0, mi=1.0, e=1000.0, vti=1.0, n0_avg=1.0,
             R0_over_LT=6.9, R0_over_Ln=2.2, vpar_cap=4.0,
-            k_mode=35,
+            k_mode=35, single_mode=True,
         )
     else:
         cfg = SimConfigFA(
@@ -54,7 +54,7 @@ def _worker_cbc_peak(quick: bool):
             R0=1.0, a=0.18, B0=1.0, q0=1.4, q1=0.5,
             Ti=1.0, Te=1.0, mi=1.0, e=1000.0, vti=1.0, n0_avg=1.0,
             R0_over_LT=6.9, R0_over_Ln=2.2, vpar_cap=4.0,
-            k_mode=35,
+            k_mode=35, single_mode=True,
         )
 
     diags, _, _, _ = run_simulation_fa(cfg, jax.random.PRNGKey(0), verbose=True)
@@ -69,7 +69,8 @@ def _worker_spectrum(quick: bool):
     """Run γ(ky) spectrum and print JSON result."""
     import jax
     from gyrojax.simulation_fa import SimConfigFA, run_simulation_fa
-    from benchmarks.gamma_spectrum import estimate_ky_rho, extract_growth_rate, DIMITS_REF
+    from gyrojax.diagnostics import extract_growth_rate_smart
+    from benchmarks.gamma_spectrum import estimate_ky_rho, DIMITS_REF
 
     a, q0, q1, rho_star = 0.18, 1.4, 0.5, 1.0/180.0
     q_ref = q0 + q1 * 0.5**2
@@ -93,10 +94,11 @@ def _worker_spectrum(quick: bool):
             R0=1.0, a=a, B0=1.0, q0=q0, q1=q1,
             Ti=1.0, Te=1.0, mi=1.0, e=1000.0, vti=1.0, n0_avg=1.0,
             R0_over_LT=6.9, R0_over_Ln=2.2, vpar_cap=4.0,
-            k_mode=k_mode,
+            k_mode=k_mode, single_mode=True,
         )
         diags, _, _, _ = run_simulation_fa(cfg, jax.random.PRNGKey(42 + k_mode), verbose=False)
-        gamma = extract_growth_rate([float(d.phi_max) for d in diags], cfg.dt)
+        phi_max_arr = [float(d.phi_max) for d in diags]
+        gamma, _, _ = extract_growth_rate_smart(phi_max_arr, cfg.dt)
         error = abs(gamma - ref_gamma) / ref_gamma * 100 if ref_gamma > 0 else float('nan')
         results.append({'k_mode': k_mode, 'ky_rho': ky_rho, 'gamma': gamma,
                         'ref': ref_gamma, 'error_pct': error})

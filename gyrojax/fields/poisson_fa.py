@@ -209,6 +209,40 @@ def gyroaverage_phi(
     return phi_gyro
 
 
+def filter_single_mode(phi: jnp.ndarray, k_mode: int) -> jnp.ndarray:
+    """
+    Project phi onto a single binormal Fourier mode ±k_mode.
+
+    Zeros all alpha-Fourier modes except k_alpha = ±k_mode.
+    Used for linear benchmark runs to isolate single-mode growth.
+
+    Parameters
+    ----------
+    phi    : (Npsi, Ntheta, Nalpha)
+    k_mode : toroidal/binormal mode index to keep
+
+    Returns
+    -------
+    phi_filtered : (Npsi, Ntheta, Nalpha)
+    """
+    Nalpha = phi.shape[-1]
+    phi_hat = jnp.fft.fft(phi, axis=-1)   # FFT over alpha axis
+
+    # Build mask: keep only indices k_mode and Nalpha-k_mode
+    mask = jnp.zeros(Nalpha, dtype=jnp.bool_)
+    # k_mode index and its conjugate (Nalpha - k_mode)
+    k_pos = k_mode % Nalpha
+    k_neg = (Nalpha - k_mode) % Nalpha
+    mask = mask.at[k_pos].set(True)
+    mask = mask.at[k_neg].set(True)
+    # Also keep DC (k=0) only if k_mode == 0
+    if k_mode == 0:
+        mask = mask.at[0].set(True)
+
+    phi_hat_filtered = jnp.where(mask[None, None, :], phi_hat, 0.0 + 0j)
+    return jnp.fft.ifft(phi_hat_filtered, axis=-1).real
+
+
 @jax.jit
 def solve_poisson_pade_fa(
     delta_n: jnp.ndarray,
