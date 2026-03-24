@@ -200,9 +200,10 @@ def update_weights(
 
     new_weight = state.weight + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
 
-    # Soft weight limiter: tanh-based, differentiable (replaces hard clip)
-    # Prevents blow-up while preserving gradients near |w| < w_max
-    w_max = 3.0
+    # Soft weight limiter: tanh-based, differentiable
+    # w_max=20 leaves the linear growth regime (|w|<<1) completely unaffected
+    # while preventing runaway blow-up in nonlinear saturation
+    w_max = 20.0
     new_weight = w_max * jnp.tanh(new_weight / w_max)
 
     return GCState(
