@@ -76,7 +76,7 @@ class SimConfigFA:
     # Global geometry flag
     use_global: bool = False   # True = global profiles, False = flux-tube
     # Perturbation seeding
-    pert_amp: float = 1e-4          # perturbation amplitude — small enough for clean linear phase
+    pert_amp: float = 1e-2          # perturbation amplitude — use 1e-2 for single-mode benchmarks, 1e-4 for multi-mode
     zonal_init: bool = False        # if True, seed zonal flow (k_theta=0) for R-H/GAM tests
     k_mode: int = 1                 # binormal mode number n for ITG seed: sin(2θ + n·α)
     single_mode: bool = False       # if True, project phi to ±k_mode after each Poisson solve (linear benchmark mode)
@@ -200,7 +200,6 @@ def _run_with_geom(
         # Away from r_mid the phase wraps, which is correct for a radially localized mode.
         n         = cfg.k_mode
         q_mid     = cfg.q0 + cfg.q1 * 0.25   # q at r = a/2
-        m_res     = int(round(float(n * q_mid)))  # resonant m
 
         theta_bal = jnp.pi / 2.0
         balloon   = jnp.exp(-(state.theta**2) / (2.0 * theta_bal**2))
@@ -209,8 +208,11 @@ def _run_with_geom(
         r_width = cfg.a * 0.25
         radial  = jnp.exp(-((state.r - r_mid)**2) / (2.0 * r_width**2))
 
-        phase = m_res * state.theta + n * state.zeta
-        pert  = cfg.pert_amp * balloon * radial * jnp.sin(phase)
+        # Seed in field-aligned alpha coordinate: α = ζ - q(r)·θ
+        # This ensures the seed lands in exactly the k_mode Fourier bin of α.
+        alpha_p = state.zeta - (cfg.q0 + cfg.q1 * (state.r / cfg.a)**2) * state.theta
+        phase   = n * alpha_p
+        pert    = cfg.pert_amp * balloon * radial * jnp.sin(phase)
     state = state._replace(weight=pert)
 
     # Allow caller to override the initial state (e.g. for R-H zonal test)
