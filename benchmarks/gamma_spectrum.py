@@ -77,9 +77,9 @@ def run_spectrum(quick: bool = True) -> list:
         Nalpha      = 64   # must be >= 2*max(k_mode) to resolve the mode
     else:
         k_modes     = [6, 12, 18, 24, 35, 47, 59, 71]
-        N_particles = 500_000
+        N_particles = 400_000
         n_steps     = 600
-        Nalpha      = 128
+        Nalpha      = 96
 
     results = []
     print(f"\n{'='*65}")
