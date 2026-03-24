@@ -199,8 +199,11 @@ def update_weights(
     k4 = _weight_rhs(state.weight + dt*k3,      v_total_r, dvpar_dt_ES, d_lnf0_dr, d_lnf0_dvp)
 
     new_weight = state.weight + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
-    # Safety clamp: |w| should stay << 1 for the δf approximation to hold
-    new_weight = jnp.clip(new_weight, -10.0, 10.0)
+
+    # Soft weight limiter: tanh-based, differentiable (replaces hard clip)
+    # Prevents blow-up while preserving gradients near |w| < w_max
+    w_max = 3.0
+    new_weight = w_max * jnp.tanh(new_weight / w_max)
 
     return GCState(
         r=state.r, theta=state.theta, zeta=state.zeta,

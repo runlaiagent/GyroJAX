@@ -68,6 +68,7 @@ def _trilinear_weights_fa(
     return i0, i1, j0, j1, k0, k1, wp, wt, wa
 
 
+@jax.jit
 def scatter_to_grid_fa(
     state,
     geom: FieldAlignedGeometry,
@@ -109,6 +110,7 @@ def scatter_to_grid_fa(
     return delta_n
 
 
+@jax.jit
 def gather_from_grid_fa(
     phi: jnp.ndarray,
     state,
