@@ -201,9 +201,9 @@ def update_weights(
     new_weight = state.weight + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
 
     # Soft weight limiter: tanh-based, differentiable
-    # w_max=20 leaves the linear growth regime (|w|<<1) completely unaffected
-    # while preventing runaway blow-up in nonlinear saturation
-    w_max = 20.0
+    # w_max=50: large enough that linear phase (|w|<<1) is completely unaffected,
+    # but prevents NaN blow-up in deep nonlinear regime
+    w_max = 50.0
     new_weight = w_max * jnp.tanh(new_weight / w_max)
 
     return GCState(
