@@ -226,15 +226,18 @@ def extract_growth_rate_smart(phi_max: np.ndarray, dt: float) -> tuple:
         c = np.polyfit(t, log_phi, 1)
         return float(max(c[0], 0.0)), 0, n
 
-    # Physics-based time bounds
-    t_skip       = 5.0   # skip initial transient
-    t_max_linear = 25.0  # linear phase can't last past this
-    sat_threshold = 5e-2  # phi_max above this → nonlinear saturation
+    # Physics-based time bounds for CBC ITG:
+    # - Transient lasts ~t=1-2 (particle initialization noise)
+    # - Linear phase: t=2-8 (phi grows exponentially)
+    # - Saturation onset: phi_max > sat_threshold OR t > t_max_linear
+    t_skip       = 2.0    # skip initialization noise
+    t_max_linear = 15.0   # linear phase ends well before this
+    sat_threshold = 3e-2  # phi_max above this → entering nonlinear
 
-    step_skip = max(5, int(t_skip / dt))
+    step_skip = max(3, int(t_skip / dt))
     step_max  = min(n, int(t_max_linear / dt))
 
-    # Find saturation onset: first step (after skip) where phi_max > threshold
+    # Find saturation onset
     sat_step = step_max
     for i in range(step_skip, n):
         if arr[i] > sat_threshold:
@@ -243,24 +246,29 @@ def extract_growth_rate_smart(phi_max: np.ndarray, dt: float) -> tuple:
 
     n_end = min(step_max, sat_step)
 
-    if n_end - step_skip < 15:
-        # Window too short: relax constraints slightly
-        step_skip = max(3, step_skip // 2)
-        n_end = min(n, int(35.0 / dt))
-        n_end = max(n_end, step_skip + 15)
+    if n_end - step_skip < 10:
+        # Window too short — relax sat threshold and extend
+        for thresh in [0.1, 0.5, 5.0]:
+            sat_step = step_max
+            for i in range(step_skip, n):
+                if arr[i] > thresh:
+                    sat_step = i
+                    break
+            n_end = min(step_max, sat_step)
+            if n_end - step_skip >= 10:
+                break
 
-    log_window = log_phi[step_skip:n_end]
-    n_win = len(log_window)
-
-    if n_win < 10:
-        # Last resort fallback
+    if n_end - step_skip < 5:
         n0, n1 = n // 4, 3 * n // 4
         t = np.arange(n0, n1) * dt
         c = np.polyfit(t, log_phi[n0:n1], 1)
         return float(max(c[0], 0.0)), n0, n1
 
+    log_window = log_phi[step_skip:n_end]
+    n_win = len(log_window)
+
     # Sliding window fit within the linear phase window
-    win = max(15, n_win // 4)
+    win = max(10, n_win // 3)
     slopes = []
     slope_starts = []
     for i in range(0, n_win - win):
@@ -272,26 +280,30 @@ def extract_growth_rate_smart(phi_max: np.ndarray, dt: float) -> tuple:
     slopes = np.array(slopes)
     slope_starts = np.array(slope_starts)
 
+    if len(slopes) == 0:
+        t_full = np.arange(step_skip, n_end) * dt
+        c = np.polyfit(t_full, log_phi[step_skip:n_end], 1)
+        return float(max(c[0], 0.0)), step_skip, n_end
+
     # Filter: physically plausible ITG growth rates
-    mask = (slopes > 0.005) & (slopes < 0.45)
-    if mask.sum() < 5:
-        mask = (slopes > 0.0) & (slopes < 0.6)
+    mask = (slopes > 0.005) & (slopes < 0.5)
+    if mask.sum() < 3:
+        mask = (slopes > 0.0) & (slopes < 1.0)
 
     filtered_slopes = slopes[mask]
     filtered_starts = slope_starts[mask]
 
     if len(filtered_slopes) == 0:
-        # No valid window found — fit the entire linear window
         t_full = np.arange(step_skip, n_end) * dt
         c = np.polyfit(t_full, log_phi[step_skip:n_end], 1)
         return float(max(c[0], 0.0)), step_skip, n_end
 
-    # Find segment with most stable (lowest CV) positive slope
+    # Find the most stable (lowest CV) segment
     best_gamma = 0.0
     best_start, best_end = int(filtered_starts[0]), n_end
     best_score = float('inf')
 
-    seg_win = max(5, len(filtered_slopes) // 3)
+    seg_win = max(3, len(filtered_slopes) // 3)
     for i in range(len(filtered_slopes) - seg_win + 1):
         seg = filtered_slopes[i:i+seg_win]
         mean_s = float(seg.mean())
