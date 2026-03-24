@@ -1,148 +1,204 @@
 """
-Rosenbluth-Hinton zonal flow residual test.
+Rosenbluth-Hinton zonal flow residual + GAM frequency benchmark.
 
-Initializes a zonal-flow-only perturbation (no ITG drive), then measures
-how the zonal φ decays toward the theoretical neoclassical residual:
+Physics:
+  Initialize a zonal flow (kθ=kα=0), zero drives, let relax.
+  The flow damps to a nonzero residual due to neoclassical orbit averaging.
+  Before settling, it oscillates at the GAM frequency.
 
-    φ_res / φ_0 = 1 / (1 + 1.6 · q² / √ε)
+References:
+  Rosenbluth & Hinton, PRL 80, 724 (1998)  — zonal flow residual
+  Winsor, Johnson & Dawson, Phys. Fluids 11, 2448 (1968) — GAM frequency
 
-For CBC parameters (q=1.4, ε=0.18):  residual ≈ 0.119
-
-Reference: Rosenbluth & Hinton, Phys. Rev. Lett. 80, 724 (1998)
-           Dimits et al., Phys. Plasmas 7, 969 (2000)
-
-Usage:
-    python benchmarks/rosenbluth_hinton.py [--quick]
+Theory:
+  residual = 1 / (1 + 1.6·q²/√ε)    ε = r/R0 (local inverse aspect ratio)
+  ω_GAM   = (vti/R0) · √(7/4 + Te/Ti)
 """
 
-import sys, os
-import argparse
+import os, sys
 import numpy as np
 import jax
 import jax.numpy as jnp
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from gyrojax.simulation_fa import SimConfigFA, run_simulation_fa
-from gyrojax.geometry.field_aligned import build_field_aligned_geometry
-from gyrojax.simulation_fa import _run_with_geom
 
 
-def rh_theory(q: float, epsilon: float) -> float:
-    """Rosenbluth-Hinton residual: 1 / (1 + 1.6*q^2/sqrt(eps))"""
-    return 1.0 / (1.0 + 1.6 * q**2 / np.sqrt(epsilon))
+# ── Analytic predictions ────────────────────────────────────────────────────
+
+def rh_residual_theory(q: float, eps: float) -> float:
+    """Rosenbluth-Hinton residual = 1 / (1 + 1.6·q²/√ε)."""
+    return 1.0 / (1.0 + 1.6 * q**2 / np.sqrt(eps))
 
 
-def extract_zonal_rms(phi: np.ndarray) -> float:
+def gam_frequency_theory(vti: float, R0: float, Te_over_Ti: float = 1.0) -> float:
+    """GAM angular frequency ω = (vti/R0)·√(7/4 + Te/Ti)."""
+    return (vti / R0) * np.sqrt(7.0 / 4.0 + Te_over_Ti)
+
+
+# ── Diagnostic helpers ──────────────────────────────────────────────────────
+
+def extract_phi_zonal(phi_flat, grid_shape):
+    """Average φ over θ and α → zonal component at each ψ. Shape: (Npsi,)."""
+    return np.array(phi_flat).reshape(grid_shape).mean(axis=(1, 2))
+
+
+def compute_residual(phi_zonal_series, t_series, t_settle: float = 20.0):
     """
-    Extract zonal-flow component of phi.
-    Zonal = ky=0, kz=0 → average over theta and alpha (last two dims).
-    Returns rms of phi averaged over (theta, alpha).
+    Residual = mean |φ_zonal(t>t_settle)| / |φ_zonal(0)|.
+    Uses mid-radius ψ index.
     """
-    phi_zonal = phi.mean(axis=(1, 2))   # shape (Npsi,)
-    return float(np.sqrt(np.mean(phi_zonal**2)))
+    mid = phi_zonal_series.shape[1] // 2
+    phi_mid = phi_zonal_series[:, mid]
+    phi0 = abs(phi_mid[0]) + 1e-20
+    mask = t_series > t_settle
+    if mask.sum() < 5:
+        mask = t_series > t_series[-1] * 0.5   # fallback: use last half
+    return float(np.abs(phi_mid[mask]).mean() / phi0)
 
 
-def run_rh_test(quick: bool = True) -> dict:
-    q0    = 1.4
-    eps   = 0.18       # a/R0
-    R0    = 1.0
-    a     = R0 * eps
+def compute_gam_frequency(phi_zonal_series, dt: float):
+    """
+    GAM frequency from FFT of zonal φ(t) at mid-radius.
+    Returns dominant angular frequency ω in vti/R0 units.
+    """
+    mid = phi_zonal_series.shape[1] // 2
+    signal = phi_zonal_series[:, mid]
+    signal -= signal.mean()           # remove DC
+    n = len(signal)
+    freqs = np.fft.rfftfreq(n, d=dt) * 2.0 * np.pi   # angular freq
+    power = np.abs(np.fft.rfft(signal))**2
+    power[0] = 0.0                    # zero DC
+    # Find peak (exclude very low frequencies = slow drift, not GAM)
+    min_freq = 0.3                    # ignore below 0.3 vti/R0
+    power[freqs < min_freq] = 0.0
+    if power.max() == 0:
+        return 0.0
+    return float(freqs[np.argmax(power)])
 
-    theory = rh_theory(q0, eps)
 
+# ── Main benchmark ──────────────────────────────────────────────────────────
+
+def run_rh_benchmark(quick: bool = False, verbose: bool = True):
+    print("=" * 65)
+    print("  GyroJAX — Rosenbluth-Hinton & GAM Frequency Benchmark")
+    print("  Rosenbluth & Hinton, PRL 80, 724 (1998)")
+    print("=" * 65)
+
+    # CBC geometry, zero drives
     if quick:
-        Npsi, Ntheta, Nalpha = 16, 32, 16
-        N_particles = 50_000
-        n_steps     = 80
+        cfg = SimConfigFA(
+            Npsi=24, Ntheta=32, Nalpha=8,
+            N_particles=100_000,
+            n_steps=400,
+            dt=0.05,
+            R0_over_LT=0.0,
+            R0_over_Ln=0.0,
+            pert_amp=1e-2,
+            zonal_init=True,
+            R0=1.0, a=0.18, B0=1.0,
+            q0=1.4, q1=0.0,
+            Ti=1.0, Te=1.0, mi=1.0, e=1000.0, vti=1.0, n0_avg=1.0,
+            vpar_cap=4.0,
+        )
+        print("  [QUICK MODE: 100k particles, 400 steps]")
     else:
-        Npsi, Ntheta, Nalpha = 32, 64, 32
-        N_particles = 500_000
-        n_steps     = 200
+        cfg = SimConfigFA(
+            Npsi=32, Ntheta=32, Nalpha=8,
+            N_particles=300_000,
+            n_steps=800,
+            dt=0.05,
+            R0_over_LT=0.0,
+            R0_over_Ln=0.0,
+            pert_amp=1e-2,
+            zonal_init=True,
+            R0=1.0, a=0.18, B0=1.0,
+            q0=1.4, q1=0.0,
+            Ti=1.0, Te=1.0, mi=1.0, e=1000.0, vti=1.0, n0_avg=1.0,
+            vpar_cap=4.0,
+        )
+        print("  [FULL MODE: 300k particles, 800 steps]")
 
-    # No ITG drive — pure zonal flow test
-    cfg = SimConfigFA(
-        Npsi=Npsi, Ntheta=Ntheta, Nalpha=Nalpha,
-        N_particles=N_particles,
-        n_steps=n_steps,
-        dt=0.05,
-        R0=R0, a=a, B0=1.0, q0=q0, q1=0.0,
-        Ti=1.0, Te=1.0, mi=1.0, e=1000.0,
-        vti=1.0, n0_avg=1.0,
-        R0_over_LT=0.0,    # ← NO ITG drive
-        R0_over_Ln=0.0,
-        vpar_cap=4.0,
-        # Zonal seed: initialize with radial weight perturbation
-        # (handled below via custom key + weight init)
-    )
+    print(f"\n  q0={cfg.q0},  a={cfg.a},  R0={cfg.R0},  ε=a/R0={cfg.a/cfg.R0:.3f}")
+    print(f"  Grid: ({cfg.Npsi}, {cfg.Ntheta}, {cfg.Nalpha}),  dt={cfg.dt}\n")
 
-    # We need to capture phi at each step.
-    # Use _run_with_geom internals — the simulation returns diags which
-    # has phi_max history but not full phi snapshots.
-    # Instead: run and capture phi_rms_history, use it as proxy.
-    # The zonal damping shows up as decay in overall phi_rms when only
-    # zonal modes are initialized.
+    key = jax.random.PRNGKey(0)
+    diags, state, phi_final, geom = run_simulation_fa(cfg, key, verbose=verbose)
 
-    print(f"[R-H test] grid ({Npsi},{Ntheta},{Nalpha}), N={N_particles:,}, {n_steps} steps")
-    print(f"[R-H test] Theory residual: {theory:.4f}")
+    grid_shape = (cfg.Npsi, cfg.Ntheta, cfg.Nalpha)
+    t_series = np.arange(len(diags)) * cfg.dt
 
-    key = jax.random.PRNGKey(77)
-    geom = build_field_aligned_geometry(
-        Npsi=Npsi, Ntheta=Ntheta, Nalpha=Nalpha,
-        R0=R0, a=a, B0=1.0, q0=q0, q1=0.0,
-    )
+    # Collect zonal φ time series using dedicated phi_zonal_mid diagnostic
+    phi_zonal_mid_arr = np.array([float(d.phi_zonal_mid) for d in diags])
+    phi_max_arr       = np.array([float(d.phi_max) for d in diags])
 
-    # Initialize with zonal perturbation:
-    # weight ~ amp * cos(2π * r / a)  so δn is purely radial (zonal)
-    from gyrojax.particles.guiding_center import init_maxwellian_particles
-    from gyrojax.geometry.salpha import build_salpha_geometry
+    # Use |phi_zonal_mid| for residual measurement
+    phi0 = abs(phi_zonal_mid_arr[0]) + 1e-20
+    phi_norm = np.abs(phi_zonal_mid_arr) / phi0
 
-    geom_sa = build_salpha_geometry(Npsi, Ntheta, Nalpha, R0=R0, a=a,
-                                     B0=1.0, q0=q0, q1=0.0)
-    key, pkey = jax.random.split(key)
-    state0 = init_maxwellian_particles(N_particles, geom_sa, 1.0, 1.0, 1.0, pkey)
+    # Settle time: last 40% of run
+    t_settle = t_series[int(len(t_series) * 0.60)]
+    late_mask = t_series >= t_settle
+    residual_measured = float(phi_norm[late_mask].mean())
 
-    # Perturb weights: zonal cosine in radius
-    amp = 0.02
-    r_norm = (state0.r - a * 0.0) / a   # r/a ∈ [0,1]
-    w_zonal = amp * jnp.cos(2.0 * jnp.pi * r_norm)
-    state0 = state0._replace(weight=w_zonal)
+    # GAM: FFT of zonal phi_mid time series (oscillates before settling)
+    signal = phi_zonal_mid_arr.copy()
+    signal -= signal[late_mask].mean()    # remove late-time DC offset
+    n = len(signal)
+    freqs = np.fft.rfftfreq(n, d=cfg.dt) * 2.0 * np.pi
+    power = np.abs(np.fft.rfft(signal))**2
+    power[0] = 0.0
+    power[freqs < 0.3] = 0.0
+    omega_gam_measured = float(freqs[np.argmax(power)]) if power.max() > 0 else 0.0
 
-    # Run simulation — returns diags with phi_rms per step
-    diags, state_f, phi_f, _ = _run_with_geom(cfg, geom, key, verbose=False,
-                                                state0_override=state0)
+    # Theory
+    eps_mid = (cfg.a / 2.0) / cfg.R0      # ε at mid-radius r=a/2
+    residual_theory = rh_residual_theory(cfg.q0, eps_mid)
+    omega_gam_theory = gam_frequency_theory(cfg.vti, cfg.R0, cfg.Te / cfg.Ti)
 
-    phi_rms_hist = np.array(diags['phi_rms'])
-    phi0 = phi_rms_hist[0] if phi_rms_hist[0] > 1e-14 else phi_rms_hist[1]
+    # Errors
+    rh_err  = abs(residual_measured - residual_theory) / (residual_theory + 1e-10)
+    gam_err = abs(omega_gam_measured - omega_gam_theory) / omega_gam_theory if omega_gam_measured > 0 else 1.0
 
-    if phi0 < 1e-14:
-        print("  WARNING: initial phi is zero — zonal seed may not have excited φ")
-        return {'theory': theory, 'measured': float('nan'), 'error_pct': float('nan')}
+    print("\n" + "=" * 65)
+    print("  RESULTS")
+    print("=" * 65)
+    print(f"\n  ── Rosenbluth-Hinton Residual ──────────────────────────────")
+    print(f"  ε (mid-radius)  = {eps_mid:.4f}")
+    print(f"  Theory:           {residual_theory:.4f}")
+    print(f"  Measured:         {residual_measured:.4f}  (settle t>{t_settle:.1f})")
+    print(f"  Error:            {rh_err:.1%}  ", end="")
+    if rh_err < 0.10:
+        print("✅ PASS (<10%)")
+    elif rh_err < 0.30:
+        print("⚠️  MARGINAL (<30%)")
+    else:
+        print("❌ FAIL")
 
-    # Residual = mean of last 25% of run
-    n_tail = max(5, n_steps // 4)
-    phi_tail = phi_rms_hist[-n_tail:]
-    residual = float(np.mean(phi_tail)) / float(phi0)
+    print(f"\n  ── GAM Frequency ───────────────────────────────────────────")
+    print(f"  Theory:   ω_GAM = {omega_gam_theory:.4f} vti/R0")
+    print(f"  Measured: ω_GAM = {omega_gam_measured:.4f} vti/R0")
+    print(f"  Error:           {gam_err:.1%}  ", end="")
+    if omega_gam_measured == 0:
+        print("⚠️  No clear oscillation detected")
+    elif gam_err < 0.15:
+        print("✅ PASS (<15%)")
+    elif gam_err < 0.30:
+        print("⚠️  MARGINAL (<30%)")
+    else:
+        print("❌ FAIL")
 
-    error_pct = abs(residual - theory) / theory * 100.0
+    print("\n  φ_zonal_mid time series (every 40 steps):")
+    for i in range(0, len(phi_zonal_mid_arr), max(1, len(phi_zonal_mid_arr)//10)):
+        print(f"    t={t_series[i]:6.1f}  φ_zonal_mid={phi_zonal_mid_arr[i]:.4e}  (norm={phi_norm[i]:.4f})")
 
-    print(f"\n{'='*60}")
-    print(f"  Rosenbluth-Hinton Zonal Flow Test")
-    print(f"  {'─'*54}")
-    print(f"  GyroJAX residual:  {residual:.4f}")
-    print(f"  Theory (R-H):      {theory:.4f}")
-    print(f"  Error:             {error_pct:.1f}%")
-    status = "✅ PASS" if error_pct < 30 else "⚠️  MARGINAL" if error_pct < 60 else "❌ FAIL"
-    print(f"  Status:            {status}")
-    print(f"{'='*60}\n")
-
-    return {'theory': theory, 'measured': residual, 'error_pct': error_pct,
-            'phi_rms_hist': phi_rms_hist.tolist()}
+    print("=" * 65)
+    return residual_measured, residual_theory, omega_gam_measured, omega_gam_theory
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--quick', action='store_true', default=True)
-    parser.add_argument('--full',  action='store_true', default=False)
-    args = parser.parse_args()
-    quick = not args.full
-    run_rh_test(quick=quick)
+if __name__ == "__main__":
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("--quick", action="store_true")
+    args = p.parse_args()
+    run_rh_benchmark(quick=args.quick)

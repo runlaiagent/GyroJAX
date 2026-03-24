@@ -22,7 +22,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import jax
 from gyrojax.simulation_fa import SimConfigFA, run_simulation_fa
 from benchmarks.gamma_spectrum import run_spectrum, extract_growth_rate
-from benchmarks.rosenbluth_hinton import run_rh_test, rh_theory
+from gyrojax.diagnostics import extract_growth_rate_smart
+from benchmarks.rosenbluth_hinton import run_rh_benchmark as run_rh_test, rh_residual_theory as rh_theory
 
 # ── Published reference values ────────────────────────────────────────────────
 GENE_PEAK   = 0.171
@@ -32,7 +33,7 @@ TARGET_PEAK = 0.170
 
 DIMITS_SPECTRUM = {0.2: 0.130, 0.3: 0.170, 0.4: 0.160}
 
-RH_THEORY = rh_theory(q=1.4, epsilon=0.18)   # ≈ 0.323
+RH_THEORY = rh_theory(q=1.4, eps=0.18)   # ≈ 0.323
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -49,25 +50,28 @@ def get_git_hash() -> str:
 def run_cbc_peak(quick: bool) -> dict:
     if quick:
         cfg = SimConfigFA(
-            Npsi=16, Ntheta=32, Nalpha=16,
-            N_particles=50_000, n_steps=200, dt=0.05,
+            Npsi=16, Ntheta=32, Nalpha=64,
+            N_particles=80_000, n_steps=400, dt=0.05,
             R0=1.0, a=0.18, B0=1.0, q0=1.4, q1=0.5,
             Ti=1.0, Te=1.0, mi=1.0, e=1000.0, vti=1.0, n0_avg=1.0,
             R0_over_LT=6.9, R0_over_Ln=2.2, vpar_cap=4.0,
+            k_mode=35,   # ky·ρi ≈ 0.30 (peak ITG mode)
         )
     else:
         cfg = SimConfigFA(
-            Npsi=32, Ntheta=64, Nalpha=32,
+            Npsi=32, Ntheta=64, Nalpha=128,
             N_particles=1_000_000, n_steps=600, dt=0.05,
             R0=1.0, a=0.18, B0=1.0, q0=1.4, q1=0.5,
             Ti=1.0, Te=1.0, mi=1.0, e=1000.0, vti=1.0, n0_avg=1.0,
             R0_over_LT=6.9, R0_over_Ln=2.2, vpar_cap=4.0,
+            k_mode=35,   # ky·ρi ≈ 0.30 (peak ITG mode)
         )
     key = jax.random.PRNGKey(0)
     diags, _, _, _ = run_simulation_fa(cfg, key, verbose=False)
-    gamma = extract_growth_rate(diags['phi_max'], cfg.dt)
+    phi_max = np.array([float(d.phi_max) for d in diags])
+    gamma, step_start, step_end = extract_growth_rate_smart(phi_max, cfg.dt)
     error = abs(gamma - TARGET_PEAK) / TARGET_PEAK * 100
-    return {'gamma': gamma, 'error_pct': error}
+    return {'gamma': gamma, 'error_pct': error, 'step_start': step_start, 'step_end': step_end}
 
 
 def run_spectrum_section(quick: bool) -> list:
@@ -152,6 +156,11 @@ if __name__ == '__main__':
     spectrum = run_spectrum_section(quick)
 
     print("\n[3/3] Rosenbluth-Hinton zonal flow residual...")
-    rh = run_rh_test(quick)
+    res_measured, res_theory, omega_meas, omega_theory = run_rh_test(quick=quick)
+    rh = {
+        'measured':   res_measured,
+        'theory':     res_theory,
+        'error_pct':  abs(res_measured - res_theory) / (res_theory + 1e-10) * 100,
+    }
 
     print_report(peak, spectrum, rh, git_hash)

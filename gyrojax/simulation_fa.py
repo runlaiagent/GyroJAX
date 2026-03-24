@@ -75,6 +75,10 @@ class SimConfigFA:
     vpar_cap: float = 4.0
     # Global geometry flag
     use_global: bool = False   # True = global profiles, False = flux-tube
+    # Perturbation seeding
+    pert_amp: float = 1e-3          # perturbation amplitude (larger → less noise transient)
+    zonal_init: bool = False        # if True, seed zonal flow (k_theta=0) for R-H/GAM tests
+    k_mode: int = 1                 # binormal mode number n for ITG seed: sin(2θ + n·α)
     # Collision model
     collision_model: str = 'none'   # 'none' | 'krook' | 'lorentz' | 'dougherty'
     nu_krook:  float = 0.01         # Krook damping rate
@@ -88,15 +92,17 @@ class SimConfigFA:
 
 
 class DiagnosticsFA(NamedTuple):
-    phi_rms:    jnp.ndarray
-    phi_max:    jnp.ndarray
-    weight_rms: jnp.ndarray
+    phi_rms:       jnp.ndarray
+    phi_max:       jnp.ndarray
+    weight_rms:    jnp.ndarray
+    phi_zonal_rms: jnp.ndarray = jnp.array(0.0)   # rms of zonal (theta/alpha averaged) phi
+    phi_zonal_mid: jnp.ndarray = jnp.array(0.0)   # zonal phi at mid-radius (for R-H)
 
 
 def _get_profiles(r: jnp.ndarray, cfg: SimConfigFA):
     """Gaussian density and temperature profiles (CBC-style)."""
-    Ln   = cfg.R0 / cfg.R0_over_Ln
-    LT   = cfg.R0 / cfg.R0_over_LT
+    Ln   = cfg.R0 / cfg.R0_over_Ln if cfg.R0_over_Ln != 0.0 else float('inf')
+    LT   = cfg.R0 / cfg.R0_over_LT if cfg.R0_over_LT != 0.0 else float('inf')
     r_mid = cfg.a * 0.5
     n0 = cfg.n0_avg * jnp.exp(-(r - r_mid) / Ln)
     T  = cfg.Ti     * jnp.exp(-(r - r_mid) / LT)
@@ -164,10 +170,13 @@ def _run_with_geom(
         weight=jnp.zeros(cfg.N_particles, dtype=jnp.float32),
     )
 
-    # Seed ITG perturbation: w = ε·sin(m·θ + n·α)  (m=2, n=1)
-    # Normalize amplitude to keep δn/n0 constant across particle counts
-    pert_amp = 1e-4 / float(jnp.sqrt(cfg.N_particles / 50_000))
-    pert = pert_amp * jnp.sin(2.0 * state.theta + state.zeta)
+    # Seed perturbation
+    if cfg.zonal_init:
+        # Zonal flow: depends only on r (ψ), uniform in θ and α — for R-H / GAM tests
+        pert = cfg.pert_amp * jnp.cos(2.0 * jnp.pi * state.r / cfg.a)
+    else:
+        # ITG seed: w = ε·sin(m·θ + n·α)  (m=2, n=k_mode)
+        pert = cfg.pert_amp * jnp.sin(2.0 * state.theta + cfg.k_mode * state.zeta)
     state = state._replace(weight=pert)
 
     # Allow caller to override the initial state (e.g. for R-H zonal test)
@@ -177,8 +186,8 @@ def _run_with_geom(
     phi = jnp.zeros((Npsi, Ntheta, Nalpha))
     grid_shape = (Npsi, Ntheta, Nalpha)
     q_over_m = cfg.e / cfg.mi
-    Ln = cfg.R0 / cfg.R0_over_Ln
-    LT = cfg.R0 / cfg.R0_over_LT
+    Ln = cfg.R0 / cfg.R0_over_Ln if cfg.R0_over_Ln != 0.0 else float('inf')
+    LT = cfg.R0 / cfg.R0_over_LT if cfg.R0_over_LT != 0.0 else float('inf')
 
     # --- Electron initialization ---
     from gyrojax.electrons import (
@@ -335,7 +344,13 @@ def _run_with_geom(
         phi_rms = jnp.sqrt(jnp.mean(phi**2))
         phi_max = jnp.max(jnp.abs(phi))
         w_rms   = jnp.sqrt(jnp.mean(state.weight**2))
-        diags.append(DiagnosticsFA(phi_rms=phi_rms, phi_max=phi_max, weight_rms=w_rms))
+        # Zonal phi: average over theta and alpha, rms over psi
+        phi_zonal = phi.mean(axis=(1, 2))  # shape (Npsi,)
+        phi_zonal_rms = jnp.sqrt(jnp.mean(phi_zonal**2))
+        phi_zonal_mid = phi_zonal[phi_zonal.shape[0] // 2]   # mid-radius scalar
+        diags.append(DiagnosticsFA(phi_rms=phi_rms, phi_max=phi_max, weight_rms=w_rms,
+                                   phi_zonal_rms=phi_zonal_rms,
+                                   phi_zonal_mid=phi_zonal_mid))
 
         if verbose and step % 50 == 0:
             print(f"  step {step:4d}/{cfg.n_steps}  |φ|_max={float(phi_max):.3e}  "

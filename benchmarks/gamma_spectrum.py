@@ -1,8 +1,12 @@
 """
 Linear growth rate spectrum γ(ky·ρi) for CBC.
 
-Sweeps over Nalpha to sample different dominant toroidal mode numbers,
-extracting γ at each effective ky.
+Sweeps over binormal mode number k_mode (n in sin(2θ + n·α)) to sample
+different ky·ρi values, extracting γ at each.
+
+The physical perpendicular wavenumber at the reference radius r_ref = a/2:
+    k_y · ρ_i = k_mode · q(r_ref) · ρ_star
+where ρ_star = ρ_i / a = 1/180 for CBC.
 
 Reference: Dimits et al. 2000, Phys. Plasmas 7, 969 — Table I.
 
@@ -17,7 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from gyrojax.simulation_fa import SimConfigFA, run_simulation_fa
 import jax
 
-# Dimits 2000 reference spectrum
+# Dimits 2000 reference spectrum (ky·ρi → γ in vti/R0)
 DIMITS_REF = {
     0.1: 0.050, 0.2: 0.130, 0.3: 0.170,
     0.4: 0.160, 0.5: 0.140, 0.6: 0.100,
@@ -25,15 +29,18 @@ DIMITS_REF = {
 }
 
 
-def estimate_ky_rho(Nalpha: int, a: float, rho_i: float) -> float:
+def estimate_ky_rho(k_mode: int, q_ref: float, rho_star: float) -> float:
     """
-    Dominant ky·ρi for a box of width 2π·a in α with Nalpha cells.
-    Minimum resolved wavenumber: ky_min = 1 / (a/(2π)) = 2π/a in field-line coords.
-    Dominant mode: ky ≈ (Nalpha//4) * (2π / (a * Nalpha)) = π / (2*a)
-    In GK normalization: ky·ρi where ρi = a/180
+    Physical binormal wavenumber for mode number k_mode.
+
+    In field-aligned (ψ, θ, α) coordinates the α-grid spans [0, 2π).
+    The physical perpendicular wavenumber at the reference radius is:
+        k_y = k_mode · |∇α| = k_mode · q(r_ref) / r_ref
+    In gyrokinetic normalization (lengths in units of a):
+        k_y · ρ_i = k_mode · q_ref · ρ_star
+    where ρ_star = ρ_i / a.
     """
-    ky_dominant = 2.0 * np.pi * (Nalpha // 4) / (Nalpha * a)
-    return ky_dominant * rho_i
+    return k_mode * q_ref * rho_star
 
 
 def extract_growth_rate(phi_max: list, dt: float, window: float = 0.35) -> float:
@@ -50,17 +57,28 @@ def extract_growth_rate(phi_max: list, dt: float, window: float = 0.35) -> float
 
 
 def run_spectrum(quick: bool = True) -> list:
-    a   = 0.18
-    rho_i = a / 180.0  # ρi = a/180 for CBC
+    a        = 0.18
+    q0       = 1.4
+    q1       = 0.5
+    rho_star = 1.0 / 180.0
+
+    # Reference radius for ky estimate: mid-radius r = a/2
+    # q(r_ref) = q0 + q1*(0.5)^2
+    q_ref = q0 + q1 * 0.5**2   # ≈ 1.525
 
     if quick:
-        nalpha_list = [8, 16, 24]
-        N_particles = 30_000
-        n_steps     = 150
-    else:
-        nalpha_list = [8, 12, 16, 24, 32, 48]
-        N_particles = 200_000
+        # k_modes chosen to cover ky·ρi ~ 0.1 to 0.6
+        # k_mode * q_ref * rho_star ≈ k_mode * 1.525 / 180 ≈ k_mode * 0.00847
+        # To hit ky~0.2: k_mode ~ 24; ky~0.3: k_mode~35; ky~0.4: k_mode~47
+        k_modes     = [12, 24, 35, 47, 59]
+        N_particles = 50_000
         n_steps     = 300
+        Nalpha      = 64   # must be >= 2*max(k_mode) to resolve the mode
+    else:
+        k_modes     = [6, 12, 18, 24, 35, 47, 59, 71]
+        N_particles = 300_000
+        n_steps     = 500
+        Nalpha      = 128
 
     results = []
     print(f"\n{'='*65}")
@@ -70,8 +88,8 @@ def run_spectrum(quick: bool = True) -> list:
     print(f"  {'ky·ρi':>8}  {'GyroJAX γ':>12}  {'Dimits ref':>12}  {'Error':>8}")
     print(f"{'─'*65}")
 
-    for Nalpha in nalpha_list:
-        ky_rho = estimate_ky_rho(Nalpha, a, rho_i)
+    for k_mode in k_modes:
+        ky_rho = estimate_ky_rho(k_mode, q_ref, rho_star)
         # Find closest Dimits reference
         closest_ky = min(DIMITS_REF.keys(), key=lambda k: abs(k - ky_rho))
         ref_gamma  = DIMITS_REF[closest_ky]
@@ -79,17 +97,18 @@ def run_spectrum(quick: bool = True) -> list:
         cfg = SimConfigFA(
             Npsi=16, Ntheta=32, Nalpha=Nalpha,
             N_particles=N_particles, n_steps=n_steps, dt=0.05,
-            R0=1.0, a=a, B0=1.0, q0=1.4, q1=0.5,
+            R0=1.0, a=a, B0=1.0, q0=q0, q1=q1,
             Ti=1.0, Te=1.0, mi=1.0, e=1000.0, vti=1.0, n0_avg=1.0,
             R0_over_LT=6.9, R0_over_Ln=2.2, vpar_cap=4.0,
+            k_mode=k_mode,
         )
-        key = jax.random.PRNGKey(42 + Nalpha)
+        key = jax.random.PRNGKey(42 + k_mode)
         diags, _, _, _ = run_simulation_fa(cfg, key, verbose=False)
-        gamma = extract_growth_rate(diags['phi_max'], cfg.dt)
+        gamma = extract_growth_rate([float(d.phi_max) for d in diags], cfg.dt)
         error = abs(gamma - ref_gamma) / ref_gamma * 100 if ref_gamma > 0 else float('nan')
         flag  = '✅' if error < 25 else '⚠️ '
         print(f"  {ky_rho:>8.3f}  {gamma:>12.4f}  {ref_gamma:>12.3f}  {error:>7.1f}%  {flag}")
-        results.append({'Nalpha': Nalpha, 'ky_rho': ky_rho, 'gamma': gamma,
+        results.append({'k_mode': k_mode, 'ky_rho': ky_rho, 'gamma': gamma,
                         'ref': ref_gamma, 'error_pct': error})
 
     print(f"{'='*65}\n")

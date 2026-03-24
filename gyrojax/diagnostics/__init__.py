@@ -197,6 +197,95 @@ def extract_growth_rate(
     return float(coeffs[0])
 
 
+def extract_growth_rate_smart(phi_max: np.ndarray, dt: float) -> tuple:
+    """
+    Find the clean linear growth phase automatically.
+
+    Method:
+    1. Skip initial transient (first 15% of steps)
+    2. Compute local slope d(log|φ|)/dt in sliding windows
+    3. Filter out unphysically fast slopes (>0.5 vti/R0 for ITG)
+    4. Find the segment where slope is positive and most stable (low CV)
+    5. Return γ = mean slope in that segment, plus (step_start, step_end)
+
+    Returns: (gamma, step_start, step_end)
+    """
+    arr = np.array(phi_max)
+    arr = np.maximum(arr, 1e-20)
+    log_phi = np.log(arr)
+    n = len(log_phi)
+
+    if n < 10:
+        # Too short: fallback
+        t = np.arange(n) * dt
+        c = np.polyfit(t, log_phi, 1)
+        return float(max(c[0], 0.0)), 0, n
+
+    # Skip initial transient (first 25% — noise-driven phase for CBC lasts ~150 steps)
+    skip = max(10, n // 4)
+
+    # Sliding window linear fit
+    win = max(20, n // 10)
+    slopes = []
+    slope_starts = []
+    for i in range(skip, n - win):
+        t = np.arange(win) * dt
+        c = np.polyfit(t, log_phi[i:i+win], 1)
+        slopes.append(c[0])
+        slope_starts.append(i)
+    slopes = np.array(slopes)
+    slope_starts = np.array(slope_starts)
+
+    if len(slopes) == 0:
+        t = np.arange(n) * dt
+        c = np.polyfit(t, log_phi, 1)
+        return float(max(c[0], 0.0)), 0, n
+
+    # Filter: keep only physically plausible ITG slopes (0.01 < γ < 0.5)
+    mask = (slopes > 0.01) & (slopes < 0.5)
+    if mask.sum() < 5:
+        # Relax upper bound if no valid slopes found
+        mask = (slopes > 0.0) & (slopes < 1.0)
+
+    filtered_slopes = slopes[mask]
+    filtered_starts = slope_starts[mask]
+
+    if len(filtered_slopes) == 0:
+        # Fallback: use middle third
+        n0, n1 = n // 3, 2 * n // 3
+        t = np.arange(n0, n1) * dt
+        c = np.polyfit(t, log_phi[n0:n1], 1)
+        return float(max(c[0], 0.0)), n0, n1
+
+    # Find segment with most stable (lowest CV) positive slopes
+    best_gamma = 0.0
+    best_start, best_end = skip, n
+    best_score = float('inf')
+
+    seg_win = max(10, len(filtered_slopes) // 4)
+    for i in range(len(filtered_slopes) - seg_win):
+        seg = filtered_slopes[i:i+seg_win]
+        mean_s = seg.mean()
+        if mean_s > 0.01:
+            cv = seg.std() / (mean_s + 1e-10)
+            if cv < best_score:
+                best_score = cv
+                best_gamma = float(mean_s)
+                best_start = int(filtered_starts[i])
+                best_end   = min(int(filtered_starts[i]) + seg_win + win, n)
+
+    if best_gamma == 0.0:
+        # Fallback: use middle third after skip
+        n0, n1 = (n + skip) // 2, 3 * n // 4
+        n0 = max(n0, skip)
+        t = np.arange(n0, n1) * dt
+        c = np.polyfit(t, log_phi[n0:n1], 1)
+        best_gamma = float(max(c[0], 0.0))
+        best_start, best_end = n0, n1
+
+    return best_gamma, best_start, best_end
+
+
 def extract_mode_frequency(
     phi_series: np.ndarray,
     dt: float,
@@ -274,3 +363,7 @@ def compute_snapshot(
         weight_rms=weight_rms, gamma_inst=float(gamma_inst),
         Q_ion=np.array(Q), phi_zf_rms=phi_zf_rms, phi_turb_rms=phi_turb_rms,
     )
+
+
+# ---------------------------------------------------------------------------
+# Smart growth rate extractor
