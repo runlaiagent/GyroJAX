@@ -41,7 +41,7 @@ def _worker_cbc_peak(quick: bool):
     if quick:
         cfg = SimConfigFA(
             Npsi=16, Ntheta=32, Nalpha=64,
-            N_particles=80_000, n_steps=400, dt=0.05,
+            N_particles=300_000, n_steps=600, dt=0.05,
             R0=1.0, a=0.18, B0=1.0, q0=1.4, q1=0.5,
             Ti=1.0, Te=1.0, mi=1.0, e=1000.0, vti=1.0, n0_avg=1.0,
             R0_over_LT=6.9, R0_over_Ln=2.2, vpar_cap=4.0,
@@ -76,7 +76,7 @@ def _worker_spectrum(quick: bool):
 
     if quick:
         k_modes = [12, 24, 35, 47, 59]
-        N_particles, n_steps, Nalpha = 50_000, 300, 64
+        N_particles, n_steps, Nalpha = 200_000, 500, 64
     else:
         k_modes = [6, 12, 18, 24, 35, 47, 59, 71]
         N_particles, n_steps, Nalpha = 400_000, 600, 96

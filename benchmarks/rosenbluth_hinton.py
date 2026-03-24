@@ -89,8 +89,8 @@ def run_rh_benchmark(quick: bool = False, verbose: bool = True):
     if quick:
         cfg = SimConfigFA(
             Npsi=24, Ntheta=32, Nalpha=8,
-            N_particles=100_000,
-            n_steps=400,
+            N_particles=300_000,
+            n_steps=600,
             dt=0.05,
             R0_over_LT=0.0,
             R0_over_Ln=0.0,
