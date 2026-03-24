@@ -93,28 +93,39 @@ def _compute_drift_r(
     """
     Radial magnetic drift velocity vd_r = v_gradB_r + v_curv_r.
 
-    Standard GC drift (in physical units):
+    Standard GC drift in s-α (circular, large-aspect-ratio) geometry:
+
       v_gradB = (μ/mΩ) · (b̂ × ∇B)/B
       v_curv  = (v∥²/Ω) · (b̂ × κ)
 
-    Radial (ψ) component in field-aligned / s-α coords:
-      vd_r = -(μ/mΩ)·gradB_th/R  - (v∥²/Ω)·kappa_th/R
-    where R ~ q*R0/r * r = q*R0 is the connection length scale.
+    In s-α the b̂ × ∇B and b̂ × κ vectors both point in the (r̂, ζ̂) plane.
+    The RADIAL (ψ) component comes from the RADIAL parts:
 
-    With kappa_th = sin(θ)/R(r) and gradB_th ~ sin(θ)·ε/R0, the
-    `/R0` is already encoded in the geometry arrays; no extra 1/r factor.
+      v_gradB_r  = -(μ/mΩ) · gradB_psi
+                   with gradB_psi = ∂B/∂r = -B²cos(θ)/(B₀·R₀)
+                   → v_gradB_r = +(μ·B²·cos(θ)) / (mΩ·B₀·R₀)  [outward at θ=0]
+
+      v_curv_r   = -(v∥²/Ω) · kappa_psi
+                   with kappa_psi = -cos(θ)/R
+                   → v_curv_r   = +(v∥²·cos(θ)) / (Ω·R)        [outward at θ=0]
+
+    Both are positive (outward) at the outboard midplane θ=0 — the "bad curvature"
+    region that drives ITG. This is the correct ITG drive.
+
+    IMPORTANT: the previous code used gradB_th and kappa_th (geodesic components),
+    which are proportional to sin(θ) — these average to zero over a flux surface
+    and do NOT drive ITG. The radial components (∝ cos(θ)) are the ITG drive.
     """
     Omega = q_over_m * B                              # cyclotron frequency
-    # Safe division: preserve sign of Omega (negative for electrons), avoid |Omega|→0
     Omega_safe = jnp.sign(Omega) * jnp.maximum(jnp.abs(Omega), 1e-10)
 
-    # ∇B drift radial component: -(μ/mΩ) * ∂|B|/∂θ_physical
-    # gradB_th has units of B/m (physical gradient, not normalized)
-    v_gradB_r = -(mu / (mi * Omega_safe)) * gradB_th
+    # ∇B drift radial component: uses RADIAL gradient gradB_psi = ∂B/∂r
+    # gradB_psi = -B²cos(θ)/(B₀·R₀)  →  v_gradB_r = -(μ/mΩ) * gradB_psi  [outward at θ=0]
+    v_gradB_r = -(mu / (mi * Omega_safe)) * gradB_r
 
-    # Curvature drift radial component: -(v∥²/Ω) * κ_θ
-    # kappa_th has units of 1/m (physical curvature, not normalized)
-    v_curv_r  = -(vpar**2 / Omega_safe) * kappa_th
+    # Curvature drift radial component: uses RADIAL curvature kappa_psi = -cos(θ)/R
+    # v_curv_r = -(v∥²/Ω) * kappa_psi  →  +(v∥²·cos(θ))/(Ω·R)  [outward at θ=0]
+    v_curv_r  = -(vpar**2 / Omega_safe) * kappa_r
 
     return v_gradB_r + v_curv_r
 

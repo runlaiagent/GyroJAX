@@ -56,21 +56,25 @@ def _gc_rhs_fa_batched(
     vE_psi   = -E_theta / B
     vE_alpha =  E_psi   / B
 
-    # --- ∇B drifts ---
+    # --- Radial ∇B drift: uses RADIAL gradient (gBpsi = ∂B/∂r = -B²cos(θ)/(B₀R₀)) ---
+    # vd_r = -(μ/mΩ) * gradB_psi  →  positive (outward) at θ=0 (bad curvature)
     prefac_grad = mu / (mi * safe_O)
-    vd_psi  = -prefac_grad * gBth / safe_r
+    vd_psi  = -prefac_grad * gBpsi
 
-    # --- Curvature drifts ---
+    # --- Radial curvature drift: uses RADIAL curvature (kpsi = -cos(θ)/R) ---
+    # vd_r = -(v∥²/Ω) * kappa_psi  →  positive (outward) at θ=0
     prefac_curv = vpar**2 / safe_O
-    vd_psi_curv = -prefac_curv * kth / safe_r
+    vd_psi_curv = -prefac_curv * kpsi
 
     # --- Equations of motion ---
     dpsi_dt   = vE_psi + vd_psi + vd_psi_curv
     dtheta_dt = vpar / (q_at_psi * R0)    # parallel streaming
     dalpha_dt = vE_alpha                   # ExB in α direction
 
-    # Parallel force: mirror only (E∥ ≈ 0 for perpendicular modes)
-    dvpar_dt   = -(mu / mi) * gBpsi
+    # Parallel force: mirror force = -(μ/m) * ∂B/∂s
+    # ∂B/∂s = ∂B/∂θ / (q·R₀)  (arc length along field line)
+    # gBth = ∂B/∂θ / (q·R₀)  already normalized (see geometry builder)
+    dvpar_dt   = -(mu / mi) * gBth
 
     return dpsi_dt, dtheta_dt, dalpha_dt, dvpar_dt
 
