@@ -11,26 +11,26 @@ import sys, os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from benchmarks.rosenbluth_hinton import rh_theory
+from benchmarks.rosenbluth_hinton import rh_residual_theory as rh_theory  # noqa: F401 (alias)
 from benchmarks.gamma_spectrum import estimate_ky_rho, extract_growth_rate, DIMITS_REF
 
 
 class TestRHFormula:
     def test_rh_formula_cbc(self):
         """RH residual for CBC params (q=1.4, eps=0.18) should be ~0.12."""
-        res = rh_theory(q=1.4, epsilon=0.18)
+        res = rh_theory(q=1.4, eps=0.18)
         assert 0.05 < res < 0.25, f"R-H residual out of range: {res:.4f}"
 
     def test_rh_formula_high_q(self):
         """Higher q → lower residual (more neoclassical damping)."""
-        r_low  = rh_theory(q=1.0, epsilon=0.18)
-        r_high = rh_theory(q=2.0, epsilon=0.18)
+        r_low  = rh_theory(q=1.0, eps=0.18)
+        r_high = rh_theory(q=2.0, eps=0.18)
         assert r_high < r_low
 
     def test_rh_formula_high_eps(self):
         """Higher epsilon (more toroidal) → lower 1.6q²/√ε → higher residual."""
-        r_low  = rh_theory(q=1.4, epsilon=0.05)
-        r_high = rh_theory(q=1.4, epsilon=0.50)
+        r_low  = rh_theory(q=1.4, eps=0.05)
+        r_high = rh_theory(q=1.4, eps=0.50)
         assert r_high > r_low
 
 
