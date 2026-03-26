@@ -87,6 +87,7 @@ def build_salpha_geometry(
     q1: float = 0.5,
     r_inner: float = 0.1,
     shafranov_shift: bool = True,
+    beta_p: float = None,
 ) -> SAlphaGeometry:
     """
     Build s-α geometry on a uniform (r, θ, ζ) grid.
@@ -121,13 +122,16 @@ def build_salpha_geometry(
     # These will broadcast correctly — no need to expand with zeros
 
     if shafranov_shift:
-        # Shafranov shift: Δ(r) = -ε²·q²·R0/2 (large-aspect-ratio, Beer 1995)
-        Delta_np = (-eps_np**2 * q_np**2 * R0 / 2.0).astype(np.float32)  # (Nr,)
-        # dΔ/dr = d/dr[-ε²·q²·R0/2] = -R0/2 * d/dr[(r/R0)²*q²]
-        #       = -R0/2 * [2r/R0² * q² + (r/R0)² * 2q*dq/dr]
-        #       = -[r*q²/R0 + r²*q*dq/dr/R0²]  (but simpler: finite difference or symbolic)
-        # dΔ/dr = -R0/2 * 2*(r/R0)*(1/R0)*q² + (-R0/2)*(r/R0)²*2*q*dqdr
-        dDelta_dr = (-(r_np / R0) * q_np**2 - (r_np / R0)**2 * q_np * dqdr).astype(np.float32)
+        # beta_p overrides the default Shafranov shift formula if provided.
+        # Default: Δ(r) = -ε²·q²·R0/2 (large-aspect-ratio, Beer 1995)
+        # With beta_p: Δ(r) = β_p * r² / (2*R0)  (GTC convention)
+        if beta_p is not None and beta_p > 0.0:
+            Delta_np = (beta_p * r_np**2 / (2.0 * R0)).astype(np.float32)
+            dDelta_dr = (beta_p * r_np / R0).astype(np.float32)
+        else:
+            # Shafranov shift: Δ(r) = -ε²·q²·R0/2 (large-aspect-ratio, Beer 1995)
+            Delta_np = (-eps_np**2 * q_np**2 * R0 / 2.0).astype(np.float32)  # (Nr,)
+            dDelta_dr = (-(r_np / R0) * q_np**2 - (r_np / R0)**2 * q_np * dqdr).astype(np.float32)
 
         Delta3 = Delta_np[:, None, None]  # broadcast (Nr,1,1)
         dDdr3  = dDelta_dr[:, None, None]
