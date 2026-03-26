@@ -398,3 +398,267 @@ def compute_snapshot(
 
 # ---------------------------------------------------------------------------
 # Smart growth rate extractor
+
+
+# ============================================================
+# GTC-style diagnostics (added: mode spectrum, growth rate, zonal flow,
+# DiagnosticsRecorder, energy diagnostics)
+# ============================================================
+
+import jax
+import jax.numpy as jnp
+from typing import List, Optional
+
+
+def compute_mode_spectrum(phi: jnp.ndarray, geom=None) -> dict:
+    """
+    Compute Fourier mode spectrum like GTC's fieldmode output.
+    phi: (Npsi, Ntheta, Nalpha)
+    Returns dict with per-mode amplitudes and dominant mode indices.
+    """
+    mid = phi.shape[0] // 2
+    phi_hat = jnp.fft.fft2(phi[mid], axes=(0, 1))   # (Ntheta, Nalpha)
+    amps = jnp.abs(phi_hat)
+
+    phi_n = jnp.mean(amps, axis=0)   # (Nalpha,)  — amplitude per toroidal mode
+    phi_m = jnp.mean(amps, axis=1)   # (Ntheta,)  — amplitude per poloidal mode
+
+    Ntheta, Nalpha = amps.shape
+    flat_idx = int(jnp.argmax(amps.ravel()))
+    dominant_m = flat_idx // Nalpha
+    dominant_n = flat_idx % Nalpha
+
+    return {
+        'phi_n': phi_n,
+        'phi_m': phi_m,
+        'dominant_n': dominant_n,
+        'dominant_m': dominant_m,
+        'phi_complex': phi_hat,   # complex (Ntheta, Nalpha) at mid-radius
+    }
+
+
+def compute_growth_rate_from_history(
+    phi_rms_history: jnp.ndarray,
+    dt: float,
+    window: int = 50,
+) -> dict:
+    """
+    Fit linear growth rate gamma from log(phi_rms) time series.
+    Like GTC: fit log|phi| = gamma*t + const over last `window` steps.
+    Returns {'gamma': float, 't_fit': array, 'phi_fit': array}
+    """
+    n = phi_rms_history.shape[0]
+    t_all = jnp.arange(n, dtype=jnp.float32) * dt
+    w = min(window, n)
+    t_fit = t_all[-w:]
+    amp_fit = jnp.maximum(phi_rms_history[-w:], 1e-30)
+    log_amp = jnp.log(amp_fit)
+
+    # Linear regression: log_amp = gamma*t + const
+    A = jnp.stack([t_fit, jnp.ones_like(t_fit)], axis=1)
+    coeffs, _, _, _ = jnp.linalg.lstsq(A, log_amp, rcond=None)
+    gamma = float(coeffs[0])
+
+    # Reconstructed fit for plotting
+    phi_fit = jnp.exp(coeffs[0] * t_fit + coeffs[1])
+
+    return {'gamma': gamma, 't_fit': t_fit, 'phi_fit': phi_fit}
+
+
+def compute_zonal_flow(phi: jnp.ndarray) -> jnp.ndarray:
+    """
+    Extract zonal flow: average phi over theta and alpha axes.
+    Returns shape (Npsi,) — the n=0, m=0 radial profile.
+    """
+    return phi.mean(axis=(1, 2))
+
+
+def compute_nonzonal(phi: jnp.ndarray) -> jnp.ndarray:
+    """Non-zonal (turbulent) component: phi minus zonal average."""
+    zf = compute_zonal_flow(phi)
+    return phi - zf[:, None, None]
+
+
+def compute_particle_moments(state, geom, grid_shape: tuple) -> dict:
+    """
+    Compute radial profiles of particle moments (like GTC data1d output).
+    Returns dict of radial profiles (shape Npsi):
+      density, vpar_mean, weight_rms
+    """
+    from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa
+
+    Npsi = grid_shape[0]
+
+    # Scatter weights → density profile
+    delta_n_3d = scatter_to_grid_fa(state, geom, grid_shape)
+    density = delta_n_3d.mean(axis=(1, 2))   # (Npsi,)
+
+    # Radial bin particle quantities
+    r_min = float(geom.psi_grid[0])
+    r_max = float(geom.psi_grid[-1])
+    dr = (r_max - r_min) / (Npsi - 1)
+    ir = jnp.clip(((state.r - r_min) / dr).astype(jnp.int32), 0, Npsi - 1)
+
+    # vpar mean per radial bin
+    vpar_sum   = jnp.zeros(Npsi).at[ir].add(state.vpar)
+    count      = jnp.zeros(Npsi).at[ir].add(1.0) + 1e-10
+    vpar_mean  = vpar_sum / count
+
+    # weight rms per radial bin
+    w2_sum    = jnp.zeros(Npsi).at[ir].add(state.weight**2)
+    weight_rms = jnp.sqrt(w2_sum / count)
+
+    return {
+        'density':    density,
+        'vpar_mean':  vpar_mean,
+        'weight_rms': weight_rms,
+    }
+
+
+def compute_energy(state, phi: jnp.ndarray, geom, cfg=None) -> dict:
+    """
+    Compute free energy components for energy conservation check (like GTC).
+    W_field ∝ sum(phi^2), W_kinetic from δf weights.
+    """
+    # Field energy: integral |phi|^2 dV (proportional)
+    W_field = float(jnp.sum(phi**2))
+
+    # Kinetic energy in δf: sum over particles of w^2 * H / f0
+    # Simplified: proportional to sum(w^2 * (0.5*vpar^2 + mu*B_avg))
+    B_avg = float(geom.B0) if hasattr(geom, 'B0') else 1.0
+    H = 0.5 * state.vpar**2 + state.mu * B_avg
+    W_kinetic = float(jnp.mean(state.weight**2 * H))
+
+    W_total = W_field + W_kinetic
+
+    return {
+        'W_field':   W_field,
+        'W_kinetic': W_kinetic,
+        'W_total':   W_total,
+    }
+
+
+class DiagnosticsRecorder:
+    """
+    GTC-style diagnostics recorder. Accumulates history during a simulation run.
+
+    Usage:
+        recorder = DiagnosticsRecorder(cfg, geom)
+        for step in range(n_steps):
+            recorder.record(step, state, phi)
+        result = recorder.finalize()
+        print(result.summary())
+    """
+    def __init__(self, cfg, geom):
+        self.cfg = cfg
+        self.geom = geom
+        self.phi_rms_history:    List[float] = []
+        self.phi_max_history:    List[float] = []
+        self.weight_rms_history: List[float] = []
+        self.phi_zonal_history:  List[float] = []
+        self.mode_amp_history:   List[complex] = []  # dominant mode complex amp
+
+    def record(self, step: int, state, phi: jnp.ndarray):
+        """Record one timestep. Blocks on JAX async to avoid graph accumulation."""
+        phi_rms = float(jnp.sqrt(jnp.mean(phi**2)))
+        phi_max = float(jnp.max(jnp.abs(phi)))
+        w_rms   = float(jnp.sqrt(jnp.mean(state.weight**2)))
+        zonal   = float(jnp.sqrt(jnp.mean(compute_zonal_flow(phi)**2)))
+
+        # Dominant mode complex amplitude at mid-psi
+        mid = phi.shape[0] // 2
+        phi_hat = jnp.fft.fft2(phi[mid], axes=(0, 1))
+        amps = jnp.abs(phi_hat)
+        flat_idx = int(jnp.argmax(amps.ravel()))
+        Nalpha = phi.shape[2]
+        dm = flat_idx // Nalpha
+        dn = flat_idx % Nalpha
+        mode_c = complex(phi_hat[dm, dn])
+
+        self.phi_rms_history.append(phi_rms)
+        self.phi_max_history.append(phi_max)
+        self.weight_rms_history.append(w_rms)
+        self.phi_zonal_history.append(zonal)
+        self.mode_amp_history.append(mode_c)
+
+    def finalize(self) -> 'DiagnosticsResult':
+        phi_rms  = jnp.array(self.phi_rms_history)
+        phi_max  = jnp.array(self.phi_max_history)
+        w_rms    = jnp.array(self.weight_rms_history)
+        zonal    = jnp.array(self.phi_zonal_history)
+        mode_amp = jnp.array(self.mode_amp_history)
+
+        dt = getattr(self.cfg, 'dt', 0.05)
+        gr = compute_growth_rate_from_history(phi_rms, dt=dt, window=min(50, len(phi_rms)))
+
+        return DiagnosticsResult(
+            phi_rms=phi_rms,
+            phi_max=phi_max,
+            weight_rms=w_rms,
+            phi_zonal_rms=zonal,
+            mode_amplitude=mode_amp,
+            gamma=gr['gamma'],
+            omega=0.0,
+            dt=dt,
+        )
+
+
+class DiagnosticsResult:
+    """Container for completed simulation diagnostics (GTC-style)."""
+
+    def __init__(self, phi_rms, phi_max, weight_rms, phi_zonal_rms,
+                 mode_amplitude, gamma: float, omega: float, dt: float):
+        self.phi_rms       = phi_rms
+        self.phi_max       = phi_max
+        self.weight_rms    = weight_rms
+        self.phi_zonal_rms = phi_zonal_rms
+        self.mode_amplitude = mode_amplitude
+        self.gamma  = gamma
+        self.omega  = omega
+        self.dt     = dt
+
+    def summary(self) -> str:
+        n = len(self.phi_rms)
+        return (
+            f"=== GyroJAX Diagnostics Summary ===\n"
+            f"  Steps:         {n}\n"
+            f"  phi_rms final: {float(self.phi_rms[-1]):.3e}\n"
+            f"  phi_max final: {float(self.phi_max[-1]):.3e}\n"
+            f"  weight_rms:    {float(self.weight_rms[-1]):.3e}\n"
+            f"  gamma (fit):   {self.gamma:.4f}\n"
+            f"  omega (fit):   {self.omega:.4f}\n"
+        )
+
+    def plot_history(self, ax=None):
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            fig, ax = plt.subplots() if ax is None else (ax.figure, ax)
+            t = np.arange(len(self.phi_rms)) * self.dt
+            ax.semilogy(t, np.array(self.phi_rms), label='phi_rms')
+            ax.semilogy(t, np.array(self.weight_rms), label='weight_rms', linestyle='--')
+            ax.set_xlabel('t [R0/vti]')
+            ax.set_ylabel('amplitude')
+            ax.legend()
+            ax.set_title('GyroJAX History')
+            return fig
+        except ImportError:
+            print("matplotlib not available")
+
+    def plot_growth_rate(self, ax=None, window: int = 50):
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            fig, ax = plt.subplots() if ax is None else (ax.figure, ax)
+            t = np.arange(len(self.phi_rms)) * self.dt
+            ax.semilogy(t, np.array(self.phi_rms), label='phi_rms')
+            # Overlay fit
+            gr = compute_growth_rate_from_history(self.phi_rms, dt=self.dt, window=window)
+            ax.semilogy(np.array(gr['t_fit']), np.array(gr['phi_fit']),
+                        'r--', label=f'fit γ={self.gamma:.3f}')
+            ax.set_xlabel('t [R0/vti]')
+            ax.legend()
+            ax.set_title('Growth Rate Fit')
+            return fig
+        except ImportError:
+            print("matplotlib not available")
