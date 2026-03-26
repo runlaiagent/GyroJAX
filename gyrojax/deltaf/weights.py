@@ -137,6 +137,7 @@ def update_weights(
     state: GCState,
     E_r: jnp.ndarray,
     E_theta: jnp.ndarray,
+    E_alpha: jnp.ndarray,
     B: jnp.ndarray,
     gradB_r: jnp.ndarray,
     gradB_th: jnp.ndarray,
@@ -160,20 +161,23 @@ def update_weights(
 
     Parameters
     ----------
-    state        : GCState with current positions/velocities
-    E_r, E_theta : E-field at particle positions (N,)
+    state          : GCState with current positions/velocities
+    E_r, E_theta, E_alpha : E-field components at particle positions (N,)
     B, gradB_r, gradB_th, kappa_r, kappa_th : geometry at particles (N,)
-    q_at_r       : safety factor at particle r (N,)
-    n0, T        : background profiles at particle positions (N,)
-    d_ln_n0_dr   : d(ln n0)/dr (N,)
-    d_ln_T_dr    : d(ln T)/dr  (N,)
-    q_over_m     : e/m
-    mi           : ion mass
-    R0           : major radius
-    dt           : timestep
+    q_at_r         : safety factor at particle r (N,)
+    n0, T          : background profiles at particle positions (N,)
+    d_ln_n0_dr     : d(ln n0)/dr (N,)
+    d_ln_T_dr      : d(ln T)/dr  (N,)
+    q_over_m       : e/m
+    mi             : ion mass
+    R0             : major radius
+    dt             : timestep
     """
-    # E×B radial drift from perturbed field
-    vE_r = -E_theta / jnp.maximum(B, 1e-10)
+    # ExB radial drive: v_ExB^ψ = q(ψ) * E_α / B
+    # In FA coords (α = ζ - q·θ): ∂φ/∂θ|_{ψ,ζ} = -q·∂φ/∂α → E_θ^phys = -q·E_α^FA
+    # So v_ExB^ψ = -E_θ^phys/B = q * E_α / B
+    safe_B = jnp.maximum(B, 1e-10)
+    vE_r = q_at_r * E_alpha / safe_B
 
     # Equilibrium magnetic drift (drives ITG!)
     vd_r = _compute_drift_r(

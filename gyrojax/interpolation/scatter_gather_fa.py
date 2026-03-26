@@ -89,24 +89,37 @@ def scatter_to_grid_fa(
     # with weights ~O(1). float32 gives ~7 significant digits.
     val  = state.weight.astype(jnp.float32)
     size = Npsi * Ntheta * Nalpha
-    grid = jnp.zeros(size, dtype=jnp.float32)
+    Nth_Nal = Ntheta * Nalpha
 
-    def add_corner(g, ii, jj, kk, w):
-        flat = ii * (Ntheta * Nalpha) + jj * Nalpha + kk
-        return g.at[flat].add(w)
-
-    grid = add_corner(grid, i0, j0, k0, val*(1-wp)*(1-wt)*(1-wa))
-    grid = add_corner(grid, i1, j0, k0, val*   wp *(1-wt)*(1-wa))
-    grid = add_corner(grid, i0, j1, k0, val*(1-wp)*   wt *(1-wa))
-    grid = add_corner(grid, i0, j0, k1, val*(1-wp)*(1-wt)*   wa )
-    grid = add_corner(grid, i1, j1, k0, val*   wp *   wt *(1-wa))
-    grid = add_corner(grid, i1, j0, k1, val*   wp *(1-wt)*   wa )
-    grid = add_corner(grid, i0, j1, k1, val*(1-wp)*   wt *   wa )
-    grid = add_corner(grid, i1, j1, k1, val*   wp *   wt *   wa )
+    # Single batched scatter: stack all 8 corners into (8*N,) arrays
+    all_flat = jnp.concatenate([
+        i0 * Nth_Nal + j0 * Nalpha + k0,
+        i1 * Nth_Nal + j0 * Nalpha + k0,
+        i0 * Nth_Nal + j1 * Nalpha + k0,
+        i0 * Nth_Nal + j0 * Nalpha + k1,
+        i1 * Nth_Nal + j1 * Nalpha + k0,
+        i1 * Nth_Nal + j0 * Nalpha + k1,
+        i0 * Nth_Nal + j1 * Nalpha + k1,
+        i1 * Nth_Nal + j1 * Nalpha + k1,
+    ])
+    all_weights = jnp.concatenate([
+        val*(1-wp)*(1-wt)*(1-wa),
+        val*   wp *(1-wt)*(1-wa),
+        val*(1-wp)*   wt *(1-wa),
+        val*(1-wp)*(1-wt)*   wa,
+        val*   wp *   wt *(1-wa),
+        val*   wp *(1-wt)*   wa,
+        val*(1-wp)*   wt *   wa,
+        val*   wp *   wt *   wa,
+    ])
+    grid = jnp.zeros(size, dtype=jnp.float32).at[all_flat].add(all_weights)
 
     n_particles = state.weight.shape[0]
-    cell_vol = (geom.psi_grid[-1] - geom.psi_grid[0]) * 2*jnp.pi * 2*jnp.pi / size
-    delta_n = grid.reshape(grid_shape) / (n_particles * cell_vol + 1e-30)
+    # Normalize so that uniform w=1 gives delta_n/n0 = 1 (dimensionless):
+    # delta_n = (N_cells / N_particles) * accumulated_weights
+    # This is equivalent to: delta_n[cell] = <w>_{particles in cell}
+    # For uniform w=1: delta_n = 1 everywhere (correct delta-f identity)
+    delta_n = grid.reshape(grid_shape) * (jnp.float32(size) / (jnp.float32(n_particles) + jnp.float32(1e-30)))
     return delta_n
 
 

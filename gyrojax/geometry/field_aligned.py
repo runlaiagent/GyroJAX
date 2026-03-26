@@ -252,7 +252,7 @@ def interp_fa_to_particles(
     """
     Interpolate geometry to particle positions in field-aligned coords.
 
-    Returns B, gradB_psi, gradB_th, kappa_psi, kappa_th — each (N,).
+    Returns B, gradB_psi, gradB_th, kappa_psi, kappa_th, g_aa — each (N,).
     Note: α doesn't enter B in s-α (axisymmetric), so we only need (ψ, θ).
     """
     from jax.scipy.ndimage import map_coordinates
@@ -268,15 +268,20 @@ def interp_fa_to_particles(
     # α doesn't affect B in s-α — use α=0 slice
     idx_al = jnp.zeros_like(psi)
 
-    coords = jnp.stack([idx_psi, idx_th, idx_al], axis=0)  # (3, N)
+    coords_3d = jnp.stack([idx_psi, idx_th, idx_al], axis=0)  # (3, N)
+    coords_2d = jnp.stack([idx_psi, idx_th], axis=0)           # (2, N) for 2D fields
 
-    def interp(field):
-        return map_coordinates(field, coords, order=1, mode='nearest')
+    def interp3(field):
+        return map_coordinates(field, coords_3d, order=1, mode='nearest')
+
+    def interp2(field):
+        return map_coordinates(field, coords_2d, order=1, mode='nearest')
 
     return (
-        interp(geom.B_field),
-        interp(geom.gradB_psi),
-        interp(geom.gradB_th),
-        interp(geom.kappa_psi),
-        interp(geom.kappa_th),
+        interp3(geom.B_field),
+        interp3(geom.gradB_psi),
+        interp3(geom.gradB_th),
+        interp3(geom.kappa_psi),
+        interp3(geom.kappa_th),
+        interp2(geom.galphaalpha),   # g^{αα}(ψ,θ)
     )

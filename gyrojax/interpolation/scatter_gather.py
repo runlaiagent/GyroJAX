@@ -55,19 +55,6 @@ def _get_trilinear_weights(
     return i0, i1, j0, j1, k0, k1, wr, wt, wz
 
 
-def _scatter_one_corner(
-    grid: jnp.ndarray,    # (Nr*Ntheta*Nzeta,) flat
-    ii: jnp.ndarray,      # (N,) int32
-    jj: jnp.ndarray,      # (N,) int32
-    kk: jnp.ndarray,      # (N,) int32
-    w:  jnp.ndarray,      # (N,) float32  combined weight
-    grid_shape: tuple,
-) -> jnp.ndarray:
-    Nr, Ntheta, Nzeta = grid_shape
-    flat = ii * (Ntheta * Nzeta) + jj * Nzeta + kk
-    return grid.at[flat].add(w)
-
-
 def scatter_to_grid(
     state,
     geom: SAlphaGeometry,
@@ -84,19 +71,33 @@ def scatter_to_grid(
     i0, i1, j0, j1, k0, k1, wr, wt, wz = _get_trilinear_weights(
         state.r, state.theta, state.zeta, geom, grid_shape
     )
-    val = state.weight.astype(jnp.float64)
+    val = state.weight.astype(jnp.float32)
     size = Nr * Ntheta * Nzeta
-    grid = jnp.zeros(size, dtype=jnp.float64)
 
-    # 8 corners (vectorized at-scatter, no Python loops in hot path)
-    grid = _scatter_one_corner(grid, i0, j0, k0, val*(1-wr)*(1-wt)*(1-wz), grid_shape)
-    grid = _scatter_one_corner(grid, i1, j0, k0, val*   wr *(1-wt)*(1-wz), grid_shape)
-    grid = _scatter_one_corner(grid, i0, j1, k0, val*(1-wr)*   wt *(1-wz), grid_shape)
-    grid = _scatter_one_corner(grid, i0, j0, k1, val*(1-wr)*(1-wt)*   wz , grid_shape)
-    grid = _scatter_one_corner(grid, i1, j1, k0, val*   wr *   wt *(1-wz), grid_shape)
-    grid = _scatter_one_corner(grid, i1, j0, k1, val*   wr *(1-wt)*   wz , grid_shape)
-    grid = _scatter_one_corner(grid, i0, j1, k1, val*(1-wr)*   wt *   wz , grid_shape)
-    grid = _scatter_one_corner(grid, i1, j1, k1, val*   wr *   wt *   wz , grid_shape)
+    # Compute all 8 corner flat indices and weights as (8*N,) arrays
+    Nth_Nze = Ntheta * Nzeta
+    all_flat = jnp.concatenate([
+        i0 * Nth_Nze + j0 * Nzeta + k0,
+        i1 * Nth_Nze + j0 * Nzeta + k0,
+        i0 * Nth_Nze + j1 * Nzeta + k0,
+        i0 * Nth_Nze + j0 * Nzeta + k1,
+        i1 * Nth_Nze + j1 * Nzeta + k0,
+        i1 * Nth_Nze + j0 * Nzeta + k1,
+        i0 * Nth_Nze + j1 * Nzeta + k1,
+        i1 * Nth_Nze + j1 * Nzeta + k1,
+    ])
+    all_weights = jnp.concatenate([
+        val*(1-wr)*(1-wt)*(1-wz),
+        val*   wr *(1-wt)*(1-wz),
+        val*(1-wr)*   wt *(1-wz),
+        val*(1-wr)*(1-wt)*   wz,
+        val*   wr *   wt *(1-wz),
+        val*   wr *(1-wt)*   wz,
+        val*(1-wr)*   wt *   wz,
+        val*   wr *   wt *   wz,
+    ])
+
+    grid = jnp.zeros(size, dtype=jnp.float32).at[all_flat].add(all_weights)
 
     # Normalize by cell volume (convert sum of weights → density perturbation)
     n_particles = state.weight.shape[0]

@@ -43,6 +43,7 @@ def _gc_rhs_fa_batched(
     kpsi: jnp.ndarray,      # (N,)
     kth: jnp.ndarray,       # (N,)
     q_at_psi: jnp.ndarray,  # (N,)
+    g_aa: jnp.ndarray,      # (N,) — g^{αα} metric at particle positions
     q_over_m: float,
     mi: float,
     R0: float,
@@ -52,9 +53,14 @@ def _gc_rhs_fa_batched(
     safe_r = jnp.maximum(psi, 1e-4)
     safe_O = jnp.sign(Omega + 1e-20) * jnp.maximum(jnp.abs(Omega), 1e-10)
 
-    # --- E×B drifts ---
-    vE_psi   = -E_theta / B
-    vE_alpha =  E_psi   / B
+    # ExB drift in field-aligned Clebsch coords (ψ, θ, α), where α = ζ - q(ψ)·θ.
+    # The radial ExB in the original (ψ, θ, ζ) coords is v_ExB^ψ = -E_θ^{phys}/B.
+    # In FA coords, ∂φ/∂θ|_{ψ,ζ} = -q(ψ)·∂φ/∂α, so E_θ^{phys} = -q(ψ)·E_α^{FA}.
+    # Therefore: v_ExB^ψ = q(ψ) * E_α / B
+    #            v_ExB^α ≈ -E_ψ / B  (plus twist correction, small)
+    safe_B = jnp.maximum(B, 1e-10)
+    vE_psi   =  q_at_psi * E_alpha / safe_B
+    vE_alpha = -E_psi   / safe_B
 
     # --- ∇B drifts ---
     prefac_grad = mu / (mi * safe_O)
@@ -87,6 +93,7 @@ def push_particles_fa(
     kpsi_geom: jnp.ndarray,
     kth_geom: jnp.ndarray,
     q_at_psi: jnp.ndarray,   # pre-interpolated
+    g_aa_p: jnp.ndarray,     # g^{αα} at particle positions
     q_over_m: float,
     mi: float,
     dt: float,
@@ -103,6 +110,7 @@ def push_particles_fa(
     E_psi, E_theta, E_alpha : E-field at particle positions, shape (N,)
     B, gBpsi, gBth, kpsi_geom, kth_geom : pre-interpolated geometry, shape (N,)
     q_at_psi : safety factor at particle positions, shape (N,)
+    g_aa_p   : g^{αα} metric at particle positions, shape (N,)
     q_over_m : e/m
     mi       : ion mass
     dt       : timestep
@@ -114,7 +122,7 @@ def push_particles_fa(
         return _gc_rhs_fa_batched(
             psi_, theta_, alpha_, vpar_,
             state.mu, E_psi, E_theta, E_alpha,
-            B, gBpsi, gBth, kpsi, kth, q_at_psi,
+            B, gBpsi, gBth, kpsi, kth, q_at_psi, g_aa_p,
             q_over_m, mi, R0,
         )
 

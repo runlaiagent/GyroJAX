@@ -208,9 +208,9 @@ def _run_with_geom(
         r_width = cfg.a * 0.25
         radial  = jnp.exp(-((state.r - r_mid)**2) / (2.0 * r_width**2))
 
-        # Seed in field-aligned alpha coordinate: α = ζ - q(r)·θ
-        # This ensures the seed lands in exactly the k_mode Fourier bin of α.
-        alpha_p = state.zeta - (cfg.q0 + cfg.q1 * (state.r / cfg.a)**2) * state.theta
+        # state.zeta IS already the field-aligned α coordinate (set by salpha_to_fa_coords).
+        # Do NOT subtract q·θ again — that would be a double transform.
+        alpha_p = state.zeta   # already α = ζ - q(r)·θ
         phase   = n * alpha_p
         pert    = cfg.pert_amp * balloon * radial * jnp.sin(phase)
     state = state._replace(weight=pert)
@@ -295,7 +295,7 @@ def _run_with_geom(
             state, phi = carry
 
             # Interpolate geometry ONCE at current positions
-            B_p, gBpsi_p, gBth_p, kpsi_p, kth_p = interp_fa_to_particles(
+            B_p, gBpsi_p, gBth_p, kpsi_p, kth_p, g_aa_p = interp_fa_to_particles(
                 geom, state.r, state.theta, state.zeta
             )
             Nr = geom.psi_grid.shape[0]
@@ -303,11 +303,12 @@ def _run_with_geom(
             ir = jnp.clip((state.r - geom.psi_grid[0]) / dr, 0.0, Nr - 1.001)
             q_at_r_p = geom.q_profile[jnp.floor(ir).astype(jnp.int32)]
 
-            # 1. scatter
+            # 1. scatter — state.zeta is already field-aligned α; just mod 2π for grid lookup
+            state_fa = state._replace(zeta=state.zeta % (2 * jnp.pi))
             if scatter_fn is not None:
-                delta_n = scatter_fn(state, geom, _gs) * cfg.n0_avg
+                delta_n = scatter_fn(state_fa, geom, _gs) * cfg.n0_avg
             else:
-                delta_n = scatter_to_grid_fa(state, geom, _gs) * cfg.n0_avg
+                delta_n = scatter_to_grid_fa(state_fa, geom, _gs) * cfg.n0_avg
 
             # 2. solve poisson
             phi = solve_poisson_fa(delta_n, geom, cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e)
@@ -315,13 +316,14 @@ def _run_with_geom(
             if cfg.single_mode:
                 phi = filter_single_mode(phi, cfg.k_mode)
 
-            # 3. gather E
-            E_psi_p, E_theta_p, E_alpha_p = gather_from_grid_fa(phi, state, geom)
+            # 3. gather E — mod 2π on α for grid lookup
+            state_gather = state._replace(zeta=state.zeta % (2 * jnp.pi))
+            E_psi_p, E_theta_p, E_alpha_p = gather_from_grid_fa(phi, state_gather, geom)
 
             # 4. push — using geometry at current (pre-push) positions
             state = push_particles_fa(
                 state, E_psi_p, E_theta_p, E_alpha_p,
-                B_p, gBpsi_p, gBth_p, kpsi_p, kth_p, q_at_r_p,
+                B_p, gBpsi_p, gBth_p, kpsi_p, kth_p, q_at_r_p, g_aa_p,
                 q_over_m, cfg.mi, cfg.dt, geom.R0,
             )
 
@@ -337,7 +339,7 @@ def _run_with_geom(
             d_ln_T_dr  = jnp.full_like(state.r, -1.0 / LT)
 
             state = update_weights(
-                state, E_psi_p, E_theta_p,
+                state, E_psi_p, E_theta_p, E_alpha_p, g_aa_p,
                 B_p, gBpsi_p, gBth_p, kpsi_p, kth_p,
                 q_at_r_p, n0_p, T_p,
                 d_ln_n0_dr, d_ln_T_dr,
@@ -376,14 +378,12 @@ def _run_with_geom(
     for step in range(cfg.n_steps):
 
         # 1. Scatter δf weights → δn on grid
-        # In δf PIC: δn(x) = Σ_p w_p·f0(X_p)·δ(x-X_p) ≈ n0·(Σ_p w_p·δ(x-X_p)) / N_cell
-        # scatter_to_grid_fa accumulates weight values per cell, normalized by N*vol.
-        # The result is in units of [weight/volume] ∝ δn/n0.
-        # Multiply by n0_avg to get physical δn.
+        # state.zeta is already field-aligned α; mod 2π for grid index arithmetic
+        state_fa = state._replace(zeta=state.zeta % (2 * jnp.pi))
         if scatter_fn is not None:
-            delta_n = scatter_fn(state, geom, grid_shape) * cfg.n0_avg
+            delta_n = scatter_fn(state_fa, geom, grid_shape) * cfg.n0_avg
         else:
-            delta_n = scatter_to_grid_fa(state, geom, grid_shape) * cfg.n0_avg
+            delta_n = scatter_to_grid_fa(state_fa, geom, grid_shape) * cfg.n0_avg
 
         # 2. Solve GK Poisson (exact Γ₀(b))
         if cfg.electron_model == 'drift_kinetic':
@@ -402,11 +402,12 @@ def _run_with_geom(
         if cfg.single_mode:
             phi = filter_single_mode(phi, cfg.k_mode)
 
-        # 3. Gather E to particle positions
-        E_psi_p, E_theta_p, E_alpha_p = gather_from_grid_fa(phi, state, geom)
+        # 3. Gather E to particle positions (mod 2π on α for grid lookup)
+        state_gather = state._replace(zeta=state.zeta % (2 * jnp.pi))
+        E_psi_p, E_theta_p, E_alpha_p = gather_from_grid_fa(phi, state_gather, geom)
 
         # Pre-interpolate geometry at current positions
-        B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p = interp_fa_to_particles(
+        B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p, g_aa_p = interp_fa_to_particles(
             geom, state.r, state.theta, state.zeta
         )
         q_at_r_p = _interp_q(state.r, geom)
@@ -414,7 +415,7 @@ def _run_with_geom(
         # 4. Push guiding centers (RK4)
         state = push_particles_fa(
             state, E_psi_p, E_theta_p, E_alpha_p,
-            B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p, q_at_r_p,
+            B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p, q_at_r_p, g_aa_p,
             q_over_m, cfg.mi, cfg.dt, geom.R0,
         )
 
@@ -445,6 +446,8 @@ def _run_with_geom(
             state,
             E_psi_p,
             E_theta_p,
+            E_alpha_p,
+            g_aa_p,
             B_p,
             gradB_psi_p,
             gradB_th_p,
@@ -472,7 +475,7 @@ def _run_with_geom(
             new_e_markers = push_electrons_dk(
                 e_state.markers, E_psi_e, E_theta_e, E_alpha_e, geom, e_cfg, cfg.dt
             )
-            B_e, gBpsi_e, gBth_e, kpsi_e, kth_e = interp_fa_to_particles(
+            B_e, gBpsi_e, gBth_e, kpsi_e, kth_e, _g_aa_e = interp_fa_to_particles(
                 geom, new_e_markers.r, new_e_markers.theta, new_e_markers.zeta
             )
             if cfg.use_global and global_profiles is not None:

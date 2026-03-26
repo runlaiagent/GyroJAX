@@ -96,14 +96,19 @@ def solve_poisson_fa(
 
     KPSI, KTH, KAL = jnp.meshgrid(kpsi, kth, kal, indexing='ij')  # (Npsi,Ntheta,Nalpha)
 
-    # g^{αα}(ψ,θ) = (q/r)²·(1 + ŝ²θ²)
-    # Broadcast to (Npsi, Ntheta, Nalpha)
-    g_aa = geom.galphaalpha[:, :, None]   # (Npsi, Ntheta, 1) → broadcasts
+    # g^{αα} at mid-radius, theta=0 (flux-tube approximation)
+    # Using the full g_aa(psi,theta) in a 3D FFT operator causes the inner-psi
+    # cells (small r, large g_aa ~ 1/r²) to dominate and suppress the response
+    # at mid-radius where the particles live.  In a flux-tube code, the Poisson
+    # operator is evaluated at the reference surface (r0, θ=0).
+    Npsi_half = Npsi // 2
+    Ntheta_half = Ntheta // 2
+    g_aa_ref = geom.galphaalpha[Npsi_half, Ntheta_half]  # scalar: mid-psi, theta=0
 
-    # Perpendicular wavenumber squared in field-aligned coords:
-    #   k²⊥ = kψ²·g^{ψψ} + kα²·g^{αα}
+    # Perpendicular wavenumber squared in field-aligned coords (flux-tube approx):
+    #   k²⊥ = kψ²·g^{ψψ} + kα²·g^{αα}(r0)
     # (θ is the parallel direction so we exclude k_θ from k⊥)
-    kperp_sq = KPSI**2 * 1.0 + KAL**2 * g_aa   # (Npsi, Ntheta, Nalpha)
+    kperp_sq = KPSI**2 * 1.0 + KAL**2 * g_aa_ref   # (Npsi, Ntheta, Nalpha)
 
     # b = k⊥²·ρᵢ²/2
     b = kperp_sq * rho_i_sq / 2.0
@@ -122,9 +127,10 @@ def solve_poisson_fa(
     kperp_zero = (kperp_sq < 1e-10)   # (Npsi, Ntheta, Nalpha)
     op = jnp.where(kperp_zero, 1.0, op)   # avoid /0; will zero phi_hat below
 
-    # FFT of RHS: (Te/n₀e) * δn
+    # FFT of RHS: (Te/e) * δn/n₀
+    # delta_n is dimensionless (δn/n₀ from scatter normalization)
     delta_n_hat = jnp.fft.fftn(delta_n.astype(jnp.complex64))
-    rhs_hat = (Te / (n0_avg * e)) * delta_n_hat
+    rhs_hat = (Te / e) * delta_n_hat
 
     # Solve
     phi_hat = rhs_hat / op

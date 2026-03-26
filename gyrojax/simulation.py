@@ -18,7 +18,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
-from gyrojax.geometry.salpha import SAlphaGeometry, build_salpha_geometry
+from gyrojax.geometry.salpha import SAlphaGeometry, build_salpha_geometry, interp_geometry_to_particles
 from gyrojax.particles.guiding_center import GCState, push_particles, init_maxwellian_particles
 from gyrojax.deltaf.weights import update_weights
 from gyrojax.fields.poisson import solve_poisson_gk, compute_efield
@@ -114,6 +114,12 @@ def run_simulation(cfg: SimConfig, key: jax.random.PRNGKey = None):
     q_over_m = cfg.e / cfg.mi
     grid_shape = (cfg.Nr, cfg.Ntheta, cfg.Nzeta)
 
+    # Hoist constant profile gradient arrays out of the loop
+    Ln = cfg.R0 / cfg.R0_over_Ln
+    LT = cfg.R0 / cfg.R0_over_LT
+    d_ln_n0_dr_const = jnp.full(cfg.N_particles, -1.0 / Ln)
+    d_ln_T_dr_const  = jnp.full(cfg.N_particles, -1.0 / LT)
+
     diags = []
 
     for step in range(cfg.n_steps):
@@ -124,7 +130,6 @@ def run_simulation(cfg: SimConfig, key: jax.random.PRNGKey = None):
         phi = solve_poisson_gk(delta_n, geom, cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e)
 
         # 3. Gather E to particles
-        E_r_g, E_th_g, E_ze_g = compute_efield(phi, geom)
         E_r_p, E_th_p, E_ze_p = gather_from_grid(phi, state, geom, cfg.mi, cfg.e)
 
         # 4. Push particles
@@ -133,25 +138,20 @@ def run_simulation(cfg: SimConfig, key: jax.random.PRNGKey = None):
         state = state._replace(r=jnp.clip(state.r, geom.r_grid[0]*1.001, geom.r_grid[-1]*0.999))
 
         # 5. Update weights (need full geometry + profiles at particle positions)
-        from gyrojax.geometry.salpha import interp_geometry_to_particles
         B_p, gradB_r_p, gradB_th_p, kappa_r_p, kappa_th_p = interp_geometry_to_particles(
             geom, state.r, state.theta, state.zeta
         )
         # Profile values at particles
         n0_p, T_p = _get_profiles(state.r, cfg)
-        Ln = cfg.R0 / cfg.R0_over_Ln
-        LT = cfg.R0 / cfg.R0_over_LT
-        d_ln_n0_dr = jnp.full_like(state.r, -1.0 / Ln)
-        d_ln_T_dr  = jnp.full_like(state.r, -1.0 / LT)
         # Safety factor at particle positions (for drift normalization)
         dr = (geom.r_grid[-1] - geom.r_grid[0]) / (len(geom.r_grid) - 1)
         ir = jnp.clip((state.r - geom.r_grid[0]) / dr, 0, len(geom.r_grid) - 1.001)
         q_at_r_p = geom.q_profile[jnp.floor(ir).astype(jnp.int32)]
 
         state = update_weights(
-            state, E_r_p, E_th_p, B_p, gradB_r_p, gradB_th_p,
+            state, E_r_p, E_th_p, E_ze_p, B_p, gradB_r_p, gradB_th_p,
             kappa_r_p, kappa_th_p, q_at_r_p,
-            n0_p, T_p, d_ln_n0_dr, d_ln_T_dr,
+            n0_p, T_p, d_ln_n0_dr_const, d_ln_T_dr_const,
             q_over_m, cfg.mi, cfg.R0, cfg.dt
         )
 
