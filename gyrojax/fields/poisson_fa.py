@@ -460,12 +460,11 @@ def compute_growth_rate(
     }
 
 
-def project_modes(phi: jnp.ndarray, n_modes: int = 5) -> dict:
+def project_modes(phi: jnp.ndarray, n_modes: int = 8) -> dict:
     """
-    Project phi onto toroidal/poloidal Fourier modes.
-
-    Returns dict mapping (m, n) → complex amplitude.
-    Like GTC's phi_real + i·phi_imag per mode output.
+    Project phi onto poloidal/toroidal Fourier modes.
+    Returns dict: {(m,n): complex_amplitude} for top n_modes modes.
+    Like GTC's per-mode phi_real + i*phi_imag output.
 
     Parameters
     ----------
@@ -474,21 +473,21 @@ def project_modes(phi: jnp.ndarray, n_modes: int = 5) -> dict:
 
     Returns
     -------
-    dict mapping (m_idx, n_idx) → complex amplitude (radially summed)
+    dict mapping (m_idx, n_idx) → complex amplitude at mid-psi
     """
     Npsi, Ntheta, Nalpha = phi.shape
-    phi_hat = jnp.fft.fft2(phi, axes=(1, 2))           # (Npsi, Ntheta, Nalpha)
-    mode_amp = jnp.sum(phi_hat, axis=0)                # (Ntheta, Nalpha) — radially integrated
+    mid = Npsi // 2
+    phi_hat = jnp.fft.fft2(phi[mid], axes=(0, 1))  # (Ntheta, Nalpha)
 
-    # Find top n_modes by |amplitude|
-    amp_abs = jnp.abs(mode_amp)
-    flat_indices = jnp.argsort(amp_abs.ravel())[::-1][:n_modes]
+    # Find top n_modes by amplitude
+    amps = jnp.abs(phi_hat)
+    flat_idx = jnp.argsort(amps.ravel())[-n_modes:][::-1]
 
     result = {}
-    for idx in flat_indices.tolist():
-        m = idx // Nalpha
-        n = idx % Nalpha
-        result[(m, n)] = complex(mode_amp[m, n])
+    for idx in flat_idx.tolist():
+        m = int(idx) // Nalpha
+        n = int(idx) % Nalpha
+        result[(m, n)] = complex(phi_hat[m, n])
     return result
 
 
