@@ -397,14 +397,12 @@ def compute_growth_rate(
     n_fit: int = 50,
 ) -> dict:
     """
-    Compute linear growth rate γ and frequency ω from phi time history.
-
-    GTC measures these from the complex mode amplitude φ_real + i·φ_imag.
-    Here we extract the dominant mode from the 3D phi array.
+    Compute linear growth rate γ and real frequency ω from phi time history.
+    Like GTC: extracts dominant mode, fits log|A(t)| for γ, phase for ω.
 
     Parameters
     ----------
-    phi_history : (n_steps, Npsi, Ntheta, Nalpha)
+    phi_history : (n_steps, Npsi, Ntheta, Nalpha) OR (n_steps,) if already rms
     dt          : timestep
     n_fit       : number of steps to use for linear fit
 
@@ -413,47 +411,52 @@ def compute_growth_rate(
     dict with keys: gamma (growth rate), omega (frequency),
                     mode_amplitude (array of dominant mode amplitude vs time)
     """
-    n_steps = phi_history.shape[0]
+    if phi_history.ndim == 1:
+        amp = phi_history
+        omega = 0.0
+        n_steps = amp.shape[0]
+        t = jnp.arange(n_steps) * dt
+        t_fit = t[-n_fit:]
+        amp_fit = amp[-n_fit:]
+        log_amp = jnp.log(jnp.maximum(amp_fit, 1e-30))
+        A = jnp.stack([t_fit, jnp.ones_like(t_fit)], axis=1)
+        coeffs, _, _, _ = jnp.linalg.lstsq(A, log_amp, rcond=None)
+        gamma = float(coeffs[0])
+        return {'gamma': gamma, 'omega': omega, 'mode_amplitude': amp}
 
-    # FFT over (Ntheta, Nalpha) for each timestep
-    phi_hat = jnp.fft.fft2(phi_history, axes=(2, 3))  # (n_steps, Npsi, Ntheta, Nalpha)
+    # FFT over spatial dims
+    phi_hat = jnp.fft.fftn(phi_history, axes=(1, 2, 3))  # (n_steps, Npsi, Ntheta, Nalpha)
 
-    # Sum over radial dimension to get mode power: (n_steps, Ntheta, Nalpha)
-    mode_power = jnp.sum(jnp.abs(phi_hat), axis=1)
+    # Find dominant mode at mid-psi, time-averaged
+    mode_amp = jnp.abs(phi_hat[:, phi_history.shape[1] // 2, :, :])  # (n_steps, Ntheta, Nalpha)
+    avg_amp = jnp.mean(mode_amp, axis=0)  # (Ntheta, Nalpha)
+    flat_idx = jnp.argmax(avg_amp)
+    jth = flat_idx // phi_history.shape[3]
+    jal = flat_idx % phi_history.shape[3]
 
-    # Find dominant mode at last time step (excluding DC)
-    power_last = mode_power[-1]
-    power_last = power_last.at[0, 0].set(0.0)  # zero out DC
+    amp = jnp.abs(phi_hat[:, phi_history.shape[1] // 2, jth, jal])
 
-    flat_idx = jnp.argmax(power_last)
-    m_dom = flat_idx // phi_history.shape[3]
-    n_dom = flat_idx % phi_history.shape[3]
-
-    # Mode amplitude vs time: sum over psi, pick (m_dom, n_dom)
-    mode_amp = jnp.sum(phi_hat[:, :, m_dom, n_dom], axis=1)  # (n_steps,) complex
-
-    # Use last n_fit points for fitting
-    t_fit = jnp.arange(n_fit) * dt
-    amp_fit = jnp.abs(mode_amp[-n_fit:])
+    n_steps = amp.shape[0]
+    t = jnp.arange(n_steps) * dt
+    t_fit = t[-n_fit:]
+    amp_fit = amp[-n_fit:]
     log_amp = jnp.log(jnp.maximum(amp_fit, 1e-30))
 
-    # Linear regression: log|A| = gamma*t + const
-    t_mean = jnp.mean(t_fit)
-    log_mean = jnp.mean(log_amp)
-    gamma = jnp.sum((t_fit - t_mean) * (log_amp - log_mean)) / jnp.sum((t_fit - t_mean) ** 2)
+    A = jnp.stack([t_fit, jnp.ones_like(t_fit)], axis=1)
+    coeffs, _, _, _ = jnp.linalg.lstsq(A, log_amp, rcond=None)
+    gamma = float(coeffs[0])
 
-    # Omega from phase unwrapping
-    phase = jnp.angle(mode_amp[-n_fit:])
-    dphase = jnp.diff(phase)
-    # Unwrap phase differences
-    dphase = jnp.where(dphase > jnp.pi, dphase - 2 * jnp.pi, dphase)
-    dphase = jnp.where(dphase < -jnp.pi, dphase + 2 * jnp.pi, dphase)
-    omega = jnp.mean(dphase) / dt
+    # Frequency from phase of complex mode amplitude
+    complex_amp = phi_hat[-n_fit:, phi_history.shape[1] // 2, jth, jal]
+    phase = jnp.angle(complex_amp)
+    phase_unwrap = jnp.unwrap(phase)
+    coeffs_ph, _, _, _ = jnp.linalg.lstsq(A, phase_unwrap, rcond=None)
+    omega = float(coeffs_ph[0])
 
     return {
-        'gamma': float(gamma),
-        'omega': float(omega),
-        'mode_amplitude': mode_amp,
+        'gamma': gamma,
+        'omega': omega,
+        'mode_amplitude': amp,
     }
 
 

@@ -188,8 +188,13 @@ def update_weights(
     # Total radial drift in weight equation
     v_total_r = vE_r + vd_r
 
-    # E∥ ≈ 0 for electrostatic perpendicular modes
-    dvpar_dt_ES = jnp.zeros_like(state.vpar)
+    # E∥ = E_theta in field-aligned coords (θ is the parallel direction)
+    # The parallel force q/m * E∥ drives Landau damping and parallel resonance.
+    # In s-α / field-aligned coords the parallel electric field component is
+    # approximated by E_theta (the theta-direction field along field lines).
+    # For electrostatic perpendicular modes this is small but non-zero and is
+    # important for kinetic electron corrections and energy conservation.
+    dvpar_dt_ES = q_over_m * E_theta   # E_par = E_theta in FA coords
 
     d_lnf0_dr, d_lnf0_dvp = log_f0_gradients(
         state.vpar, state.mu, B, gradB_r,
@@ -213,4 +218,100 @@ def update_weights(
     return GCState(
         r=state.r, theta=state.theta, zeta=state.zeta,
         vpar=state.vpar, mu=state.mu, weight=new_weight
+    )
+
+
+def init_canonical_weights(
+    state: GCState,
+    geom,
+    cfg,
+) -> GCState:
+    """
+    Initialize δf weights using the canonical momentum perturbation structure.
+
+    Instead of seeding w = ε*sin(mθ + nζ) with a flat radial profile, this
+    function seeds the perturbation using the proper eigenmode structure based
+    on the gyrokinetic canonical toroidal momentum:
+
+        p_ζ = m_i * v_∥ * R * b_ζ + (e/c) * ψ_p
+
+    The perturbation in canonical coords ensures:
+    - The k_∥ = 0 resonance condition (qm - n = 0) is automatically satisfied
+      at the resonant surface r_s where q(r_s) = n/m.
+    - Radial localization near the resonant surface r_s.
+
+    For linear ITG with mode (m, n):
+        w_0(r, θ, ζ) = A * exp(-(r - r_s)² / Δr²) * cos(m*θ + n*ζ)
+    where:
+        r_s  = resonant surface: q(r_s) = n/m (interpolated from q_profile)
+        Δr   ~ sqrt(q * rho_i / |shat|) is the characteristic mode width
+        rho_i = vti / Omega_i is the ion Larmor radius
+
+    Parameters
+    ----------
+    state : GCState with particle positions and velocities (weights will be replaced)
+    geom  : geometry object with r_grid, q_profile, B0, R0
+    cfg   : config dict or object with fields:
+              cfg.m_mode   : poloidal mode number (int)
+              cfg.n_mode   : toroidal mode number (int)
+              cfg.amplitude: perturbation amplitude ε (float, default 1e-3)
+              cfg.vti      : ion thermal velocity (for rho_i, float)
+              cfg.q_over_m : ion charge-to-mass ratio (float)
+    """
+    # Parse config
+    if hasattr(cfg, '__getitem__'):
+        m = int(cfg['m_mode'])
+        n = int(cfg['n_mode'])
+        A = float(cfg.get('amplitude', 1e-3))
+        vti = float(cfg['vti'])
+        q_over_m = float(cfg['q_over_m'])
+    else:
+        m = int(cfg.m_mode)
+        n = int(cfg.n_mode)
+        A = float(getattr(cfg, 'amplitude', 1e-3))
+        vti = float(cfg.vti)
+        q_over_m = float(cfg.q_over_m)
+
+    # Find resonant surface: q(r_s) = n / m
+    # Interpolate q_profile to find where q crosses n/m
+    q_target = n / m
+    q_vals = geom.q_profile
+    r_vals = geom.r_grid
+
+    # Bracket search: find where q_vals crosses q_target
+    # Use a weighted average of grid points for a smooth estimate
+    diff = q_vals - q_target
+    # Zero crossing: find adjacent points with sign change
+    sign_change = diff[:-1] * diff[1:] < 0
+    idx = jnp.argmax(sign_change)  # first crossing index
+    # Linear interpolation for r_s
+    r_lo = r_vals[idx];   q_lo = q_vals[idx]
+    r_hi = r_vals[idx+1]; q_hi = q_vals[idx+1]
+    r_s = float(r_lo + (q_target - q_lo) / (q_hi - q_lo + 1e-10) * (r_hi - r_lo))
+
+    # Compute ion Larmor radius rho_i = vti / Omega_i = vti * mi / (e * B0)
+    # Since q_over_m = e/mi, Omega_i = q_over_m * B0
+    Omega_i = q_over_m * geom.B0
+    rho_i   = vti / (abs(Omega_i) + 1e-10)
+
+    # Local magnetic shear shat = (r/q) * dq/dr at r_s
+    # Finite difference: shat ~ (r_s/q_s) * (q_hi - q_lo)/(r_hi - r_lo)
+    dqdr = (float(q_hi) - float(q_lo)) / (float(r_hi) - float(r_lo) + 1e-10)
+    shat = abs(r_s / (q_target + 1e-10) * dqdr)
+
+    # Mode width: Δr ~ sqrt(q * rho_i / |shat|)
+    # Use a floor on shat to avoid infinite width in zero-shear case
+    delta_r = jnp.sqrt(q_target * rho_i / (abs(shat) + 0.01 * q_target))
+    # Enforce at least one grid spacing
+    dr_grid = float(r_vals[1] - r_vals[0])
+    delta_r = float(jnp.maximum(delta_r, 2.0 * dr_grid))
+
+    # Build perturbation weights
+    phase   = m * state.theta + n * state.zeta
+    radial  = jnp.exp(-0.5 * ((state.r - r_s) / delta_r)**2)
+    w0      = A * radial * jnp.cos(phase)
+
+    return GCState(
+        r=state.r, theta=state.theta, zeta=state.zeta,
+        vpar=state.vpar, mu=state.mu, weight=w0
     )
