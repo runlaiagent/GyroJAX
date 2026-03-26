@@ -327,7 +327,7 @@ def init_maxwellian_particles(
     """
     k1, k2, k3, k4, k5 = jax.random.split(key, 5)
 
-    r_grid = getattr(geom, 'r_grid', None) or getattr(geom, 'psi_grid', None)
+    r_grid = getattr(geom, 'r_grid', None) if getattr(geom, 'r_grid', None) is not None else getattr(geom, 'psi_grid', None)
     r_min, r_max = float(r_grid[0]), float(r_grid[-1])
     r     = jax.random.uniform(k1, (N,), minval=r_min, maxval=r_max)
     theta = jax.random.uniform(k2, (N,), minval=0.0, maxval=2.0*jnp.pi)
@@ -387,7 +387,7 @@ def init_quiet_start(
 
     k1, k2, k3, k4, k5, k6 = jax.random.split(key, 6)
 
-    r_grid = getattr(geom, 'r_grid', None) or getattr(geom, 'psi_grid', None)
+    r_grid = getattr(geom, 'r_grid', None) if getattr(geom, 'r_grid', None) is not None else getattr(geom, 'psi_grid', None)
     r_min, r_max = float(r_grid[0]), float(r_grid[-1])
 
     # --- Stratified spatial sampling ---

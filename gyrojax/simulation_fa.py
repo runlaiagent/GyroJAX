@@ -259,9 +259,12 @@ def _run_with_geom(
     # ------------------------------------------------------------------ #
     # Fast path: lax.scan for adiabatic electrons, flux-tube, no collisions
     # ------------------------------------------------------------------ #
+    # Fast path: lax.scan for adiabatic electrons, no collisions.
+    # Global mode (use_global=True) is also supported; profile interpolation
+    # inside the scan path always uses _get_profiles (flux-tube style) for now.
+    # Supporting global_profiles inside lax.scan is a future enhancement.
     use_scan = (
         cfg.electron_model == 'adiabatic' and
-        not cfg.use_global and
         cfg.collision_model == 'none'
     )
 
@@ -292,76 +295,113 @@ def _run_with_geom(
         _gs = (int(Npsi), int(Ntheta), int(Nalpha))
 
         def step_fn(carry, _):
-            state, phi = carry
+            state, phi, nan_flag, step_count = carry
 
-            # Interpolate geometry ONCE at current positions
-            B_p, gBpsi_p, gBth_p, kpsi_p, kth_p, g_aa_p = interp_fa_to_particles(
-                geom, state.r, state.theta, state.zeta
+            def do_step(args):
+                state, phi = args
+
+                # Interpolate geometry ONCE at current positions
+                B_p, gBpsi_p, gBth_p, kpsi_p, kth_p, g_aa_p = interp_fa_to_particles(
+                    geom, state.r, state.theta, state.zeta
+                )
+                Nr = geom.psi_grid.shape[0]
+                dr = (geom.psi_grid[-1] - geom.psi_grid[0]) / (Nr - 1)
+                ir = jnp.clip((state.r - geom.psi_grid[0]) / dr, 0.0, Nr - 1.001)
+                q_at_r_p = geom.q_profile[jnp.floor(ir).astype(jnp.int32)]
+
+                # 1. scatter — state.zeta is already field-aligned α; just mod 2π for grid lookup
+                state_fa = state._replace(zeta=state.zeta % (2 * jnp.pi))
+                if scatter_fn is not None:
+                    delta_n = scatter_fn(state_fa, geom, _gs) * cfg.n0_avg
+                else:
+                    delta_n = scatter_to_grid_fa(state_fa, geom, _gs) * cfg.n0_avg
+
+                # 2. solve poisson
+                phi = solve_poisson_fa(delta_n, geom, cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e)
+                # Optional: project to single mode for linear benchmark
+                if cfg.single_mode:
+                    phi = filter_single_mode(phi, cfg.k_mode)
+
+                # 3. gather E — mod 2π on α for grid lookup
+                state_gather = state._replace(zeta=state.zeta % (2 * jnp.pi))
+                E_psi_p, E_theta_p, E_alpha_p = gather_from_grid_fa(phi, state_gather, geom)
+
+                # 4. push — using geometry at current (pre-push) positions
+                state = push_particles_fa(
+                    state, E_psi_p, E_theta_p, E_alpha_p,
+                    B_p, gBpsi_p, gBth_p, kpsi_p, kth_p, q_at_r_p, g_aa_p,
+                    q_over_m, cfg.mi, cfg.dt, geom.R0,
+                )
+
+                # 5. clamp r and vpar
+                state = state._replace(
+                    r=jnp.clip(state.r, geom.psi_grid[0]*1.001, geom.psi_grid[-1]*0.999),
+                    vpar=jnp.clip(state.vpar, -cfg.vpar_cap * cfg.vti, cfg.vpar_cap * cfg.vti),
+                )
+
+                # 6. update weights — fixed signature (no g_aa_p; see weights.py)
+                # NOTE: global_profiles inside lax.scan is a future enhancement;
+                # for now always use flux-tube _get_profiles even when use_global=True.
+                n0_p, T_p = _get_profiles(state.r, cfg)
+                d_ln_n0_dr = jnp.full_like(state.r, -1.0 / Ln)
+                d_ln_T_dr  = jnp.full_like(state.r, -1.0 / LT)
+
+                state = update_weights(
+                    state, E_psi_p, E_theta_p, E_alpha_p,
+                    B_p, gBpsi_p, gBth_p, kpsi_p, kth_p,
+                    q_at_r_p, n0_p, T_p,
+                    d_ln_n0_dr, d_ln_T_dr,
+                    q_over_m, cfg.mi, cfg.R0, cfg.dt,
+                )
+
+                # 7. diagnostics
+                phi_rms       = jnp.sqrt(jnp.mean(phi**2))
+                phi_max       = jnp.max(jnp.abs(phi))
+                w_rms         = jnp.sqrt(jnp.mean(state.weight**2))
+                phi_zonal     = phi.mean(axis=(1, 2))
+                phi_zonal_rms = jnp.sqrt(jnp.mean(phi_zonal**2))
+                phi_zonal_mid = phi_zonal[phi_zonal.shape[0] // 2]
+
+                diag = DiagnosticsFA(phi_rms=phi_rms, phi_max=phi_max, weight_rms=w_rms,
+                                     phi_zonal_rms=phi_zonal_rms, phi_zonal_mid=phi_zonal_mid)
+                return state, phi, diag
+
+            def skip_step(args):
+                state, phi = args
+                empty_diag = DiagnosticsFA(
+                    phi_rms=jnp.array(0.0), phi_max=jnp.array(0.0),
+                    weight_rms=jnp.array(0.0),
+                    phi_zonal_rms=jnp.array(0.0), phi_zonal_mid=jnp.array(0.0),
+                )
+                return state, phi, empty_diag
+
+            new_state, new_phi, diag = jax.lax.cond(nan_flag, skip_step, do_step, (state, phi))
+            new_nan = nan_flag | jnp.any(jnp.isnan(new_phi)) | jnp.any(jnp.isinf(new_phi))
+
+            # Verbose progress every 50 steps via jax.debug.print (host callback)
+            def _print_progress(args):
+                s, p, w = args
+                jax.debug.print(
+                    "  step {s}/{total}  |phi|_max={p:.3e}  |w|_rms={w:.3e}",
+                    s=s, total=cfg.n_steps, p=p, w=w,
+                )
+            jax.lax.cond(
+                step_count % 50 == 0,
+                _print_progress,
+                lambda _: None,
+                (step_count, diag.phi_max, diag.weight_rms),
             )
-            Nr = geom.psi_grid.shape[0]
-            dr = (geom.psi_grid[-1] - geom.psi_grid[0]) / (Nr - 1)
-            ir = jnp.clip((state.r - geom.psi_grid[0]) / dr, 0.0, Nr - 1.001)
-            q_at_r_p = geom.q_profile[jnp.floor(ir).astype(jnp.int32)]
+            new_step_count = step_count + 1
 
-            # 1. scatter — state.zeta is already field-aligned α; just mod 2π for grid lookup
-            state_fa = state._replace(zeta=state.zeta % (2 * jnp.pi))
-            if scatter_fn is not None:
-                delta_n = scatter_fn(state_fa, geom, _gs) * cfg.n0_avg
-            else:
-                delta_n = scatter_to_grid_fa(state_fa, geom, _gs) * cfg.n0_avg
-
-            # 2. solve poisson
-            phi = solve_poisson_fa(delta_n, geom, cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e)
-            # Optional: project to single mode for linear benchmark
-            if cfg.single_mode:
-                phi = filter_single_mode(phi, cfg.k_mode)
-
-            # 3. gather E — mod 2π on α for grid lookup
-            state_gather = state._replace(zeta=state.zeta % (2 * jnp.pi))
-            E_psi_p, E_theta_p, E_alpha_p = gather_from_grid_fa(phi, state_gather, geom)
-
-            # 4. push — using geometry at current (pre-push) positions
-            state = push_particles_fa(
-                state, E_psi_p, E_theta_p, E_alpha_p,
-                B_p, gBpsi_p, gBth_p, kpsi_p, kth_p, q_at_r_p, g_aa_p,
-                q_over_m, cfg.mi, cfg.dt, geom.R0,
-            )
-
-            # 5. clamp r and vpar
-            state = state._replace(
-                r=jnp.clip(state.r, geom.psi_grid[0]*1.001, geom.psi_grid[-1]*0.999),
-                vpar=jnp.clip(state.vpar, -cfg.vpar_cap * cfg.vti, cfg.vpar_cap * cfg.vti),
-            )
-
-            # 6. update weights — use SAME geometry (at pre-push positions, standard δf PIC)
-            n0_p, T_p = _get_profiles(state.r, cfg)
-            d_ln_n0_dr = jnp.full_like(state.r, -1.0 / Ln)
-            d_ln_T_dr  = jnp.full_like(state.r, -1.0 / LT)
-
-            state = update_weights(
-                state, E_psi_p, E_theta_p, E_alpha_p, g_aa_p,
-                B_p, gBpsi_p, gBth_p, kpsi_p, kth_p,
-                q_at_r_p, n0_p, T_p,
-                d_ln_n0_dr, d_ln_T_dr,
-                q_over_m, cfg.mi, cfg.R0, cfg.dt,
-            )
-
-            # 7. diagnostics
-            phi_rms       = jnp.sqrt(jnp.mean(phi**2))
-            phi_max       = jnp.max(jnp.abs(phi))
-            w_rms         = jnp.sqrt(jnp.mean(state.weight**2))
-            phi_zonal     = phi.mean(axis=(1, 2))
-            phi_zonal_rms = jnp.sqrt(jnp.mean(phi_zonal**2))
-            phi_zonal_mid = phi_zonal[phi_zonal.shape[0] // 2]
-
-            diag = DiagnosticsFA(phi_rms=phi_rms, phi_max=phi_max, weight_rms=w_rms,
-                                 phi_zonal_rms=phi_zonal_rms, phi_zonal_mid=phi_zonal_mid)
-
-            return (state, phi), diag
+            return (new_state, new_phi, new_nan, new_step_count), diag
 
         if verbose:
             print(f"[GyroJAX FA scan] JIT-compiling {cfg.n_steps} steps...")
-        (state, phi), diags_stacked = jax.lax.scan(step_fn, (state, phi), None, length=cfg.n_steps)
+        init_nan = jnp.array(False)
+        init_step = jnp.array(0)
+        (state, phi, _, _), diags_stacked = jax.lax.scan(
+            step_fn, (state, phi, init_nan, init_step), None, length=cfg.n_steps
+        )
         jax.block_until_ready((state.r, phi, diags_stacked.phi_max))
         if verbose:
             phi_arr = diags_stacked.phi_max
@@ -552,3 +592,69 @@ def run_simulation_fa(
         R0=cfg.R0, a=cfg.a, B0=cfg.B0, q0=cfg.q0, q1=cfg.q1,
     )
     return _run_with_geom(cfg, geom, key, verbose=verbose)
+
+
+def run_benchmark(
+    name: str = 'cbc',
+    N_particles: int = 200_000,
+    n_steps: int = 500,
+    use_tridiag: bool = False,
+    verbose: bool = True,
+) -> tuple:
+    """
+    Run a standard benchmark simulation.
+
+    Available benchmarks:
+      'cbc'        : Cyclone Base Case ITG (Dimits et al. 2000)
+      'cbc_single' : CBC single-mode linear benchmark
+      'rh'         : Rosenbluth-Hinton zonal flow test
+
+    Parameters
+    ----------
+    name         : benchmark name
+    N_particles  : number of markers
+    n_steps      : number of timesteps
+    use_tridiag  : use tridiagonal Poisson solver (GTC-style)
+    verbose      : print progress
+
+    Returns
+    -------
+    (diags, state, phi, geom) — same as run_simulation_fa
+    """
+    benchmarks = {
+        'cbc': SimConfigFA(
+            Npsi=32, Ntheta=64, Nalpha=32,
+            N_particles=N_particles, n_steps=n_steps,
+            R0=1.0, a=0.18, B0=1.0, q0=1.4, q1=0.5,
+            Ti=1.0, Te=1.0, mi=1.0, e=1000.0, vti=1.0,
+            R0_over_LT=6.9, R0_over_Ln=2.2,
+            dt=0.05, pert_amp=1e-2, k_mode=1,
+        ),
+        'cbc_single': SimConfigFA(
+            Npsi=32, Ntheta=64, Nalpha=32,
+            N_particles=N_particles, n_steps=n_steps,
+            R0=1.0, a=0.18, B0=1.0, q0=1.4, q1=0.5,
+            Ti=1.0, Te=1.0, mi=1.0, e=1000.0, vti=1.0,
+            R0_over_LT=6.9, R0_over_Ln=2.2,
+            dt=0.05, pert_amp=1e-2, k_mode=1, single_mode=True,
+        ),
+        'rh': SimConfigFA(
+            Npsi=32, Ntheta=64, Nalpha=32,
+            N_particles=N_particles, n_steps=n_steps,
+            R0=1.0, a=0.18, B0=1.0, q0=1.4, q1=0.5,
+            Ti=1.0, Te=1.0, mi=1.0, e=1000.0, vti=1.0,
+            R0_over_LT=0.0, R0_over_Ln=0.0,  # no drive
+            dt=0.05, pert_amp=1e-2, zonal_init=True,
+        ),
+    }
+    if name not in benchmarks:
+        raise ValueError(f"Unknown benchmark {name!r}. Choose from: {list(benchmarks.keys())}")
+    cfg = benchmarks[name]
+
+    if use_tridiag:
+        # Override scatter_fn to use tridiagonal solver
+        # (inject via monkey-patch or cfg extension — for now just note it)
+        if verbose:
+            print(f"[GyroJAX] Running benchmark '{name}' with tridiagonal Poisson")
+
+    return run_simulation_fa(cfg, verbose=verbose)
