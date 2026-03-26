@@ -250,6 +250,246 @@ def filter_single_mode(phi: jnp.ndarray, k_mode: int) -> jnp.ndarray:
 
 
 @jax.jit
+def solve_poisson_tridiag(
+    delta_n: jnp.ndarray,       # (Npsi, Ntheta, Nalpha) — perturbed density
+    geom: FieldAlignedGeometry,
+    n0_profile: jnp.ndarray,    # (Npsi,) — background density profile
+    Te: float,
+    Ti: float,
+    mi: float,
+    e: float,
+) -> jnp.ndarray:
+    """
+    GTC-style tridiagonal GK Poisson solver in field-aligned coordinates.
+
+    For each Fourier mode (kθ, kα), solves the 1D radial ODE:
+        -d/dr[n₀(r)·ρᵢ²(r)·dφ/dr] + n₀(r)·(1-Γ₀(b))·(Te/Ti)·φ = (Te/Ti)·δn̂(r,kθ,kα)
+
+    Discretized as a tridiagonal system with Dirichlet BCs (φ=0 at r=r_inner, r=a).
+
+    Parameters
+    ----------
+    delta_n    : (Npsi, Ntheta, Nalpha) perturbed ion density
+    geom       : FieldAlignedGeometry
+    n0_profile : (Npsi,) background density profile
+    Te, Ti     : electron/ion temperatures
+    mi         : ion mass
+    e          : elementary charge
+
+    Returns
+    -------
+    phi : (Npsi, Ntheta, Nalpha) electrostatic potential (real)
+    """
+    Npsi, Ntheta, Nalpha = delta_n.shape
+    Nmodes = Ntheta * Nalpha
+
+    # Radial grid spacing
+    dr = (geom.psi_grid[-1] - geom.psi_grid[0]) / (Npsi - 1)
+
+    # B at mid-theta, shape (Npsi,)
+    B_mid = geom.B_field[:, Ntheta // 2, 0]   # (Npsi,)
+
+    # Ion gyroradius squared: ρᵢ²(r) = Ti / (mi * (e*B/mi)²) = Ti*mi / (e*B)²
+    rho_sq = Ti * mi / (e * B_mid) ** 2         # (Npsi,)
+
+    # g^αα at mid-theta: shape (Npsi,)
+    g_aa_mid = geom.galphaalpha[:, Ntheta // 2]  # (Npsi,)
+
+    # Wavenumber arrays
+    dal = 2.0 * jnp.pi / Nalpha
+    dth = 2.0 * jnp.pi / Ntheta
+    kth_arr = jnp.fft.fftfreq(Ntheta, d=dth) * 2 * jnp.pi   # (Ntheta,)
+    kal_arr = jnp.fft.fftfreq(Nalpha, d=dal) * 2 * jnp.pi   # (Nalpha,)
+
+    # Build kperp_sq for all modes: shape (Nmodes, Npsi)
+    KTH, KAL = jnp.meshgrid(kth_arr, kal_arr, indexing='ij')  # (Ntheta, Nalpha)
+    KTH_flat = KTH.reshape(Nmodes)   # (Nmodes,)
+    KAL_flat = KAL.reshape(Nmodes)   # (Nmodes,)
+
+    # k⊥² = kα²·g^{αα}(r)  (kθ is parallel; radial kψ handled by finite diff)
+    # shape (Nmodes, Npsi)
+    kperp_sq = (KAL_flat[:, None] ** 2) * g_aa_mid[None, :]   # (Nmodes, Npsi)
+
+    # b = k⊥²·ρᵢ²/2, Gamma0
+    b = kperp_sq * rho_sq[None, :] / 2.0                     # (Nmodes, Npsi)
+    G0 = i0e(b)                                               # (Nmodes, Npsi)
+
+    # --- Build tridiagonal coefficients for all modes ---
+    # a_i = c_i = -n0[i]*rho_sq[i]/dr²
+    # b_i = 2*n0[i]*rho_sq[i]/dr² + n0[i]*(1-G0[i])*(Te/Ti)
+    n0 = n0_profile  # (Npsi,)
+    coeff_diff = n0[None, :] * rho_sq[None, :] / dr ** 2     # (1, Npsi) — same for all modes
+    coeff_diff = jnp.broadcast_to(coeff_diff, (Nmodes, Npsi))  # (Nmodes, Npsi)
+
+    a_diag = -coeff_diff                                      # (Nmodes, Npsi) lower
+    c_diag = -coeff_diff                                      # (Nmodes, Npsi) upper
+    b_diag = 2.0 * coeff_diff + n0[None, :] * (1.0 - G0) * (Te / Ti)  # (Nmodes, Npsi)
+
+    # Dirichlet BC: rows 0 and Npsi-1 → φ=0 (using masks to avoid JAX at[] broadcasting issues)
+    bc_mask_0 = jnp.zeros(Npsi, dtype=bool).at[0].set(True)    # (Npsi,)
+    bc_mask_n = jnp.zeros(Npsi, dtype=bool).at[-1].set(True)   # (Npsi,)
+    bc_mask = bc_mask_0 | bc_mask_n                             # (Npsi,)
+
+    # On BC rows: b=1, a=0, c=0
+    b_diag = jnp.where(bc_mask[None, :], 1.0, b_diag)
+    a_diag = jnp.where(bc_mask[None, :], 0.0, a_diag)
+    c_diag = jnp.where(bc_mask[None, :], 0.0, c_diag)
+
+    # --- RHS: (Te/Ti)*delta_n_hat, with BC zeros ---
+    # FFT in theta and alpha only
+    delta_n_hat = jnp.fft.fft2(delta_n.astype(jnp.complex64), axes=(1, 2))  # (Npsi, Ntheta, Nalpha)
+    # Reshape to (Nmodes, Npsi)
+    rhs = (Te / Ti) * delta_n_hat.transpose(1, 2, 0).reshape(Nmodes, Npsi)  # (Nmodes, Npsi)
+    rhs = jnp.where(bc_mask[None, :], jnp.zeros((), dtype=jnp.complex64), rhs.astype(jnp.complex64))
+
+    # Cast real coefficients to complex64 for unified Thomas solve
+    a_diag = a_diag.astype(jnp.complex64)
+    b_diag = b_diag.astype(jnp.complex64)
+    c_diag = c_diag.astype(jnp.complex64)
+
+    # --- Thomas algorithm via jax.lax.scan (vectorized over modes via vmap) ---
+    def thomas_single(a, b, c, d):
+        """Solve one tridiagonal system of size Npsi."""
+        # Forward sweep
+        def fwd_step(carry, x):
+            b_prev, d_prev, c_prev = carry
+            a_i, b_i, c_i, d_i = x
+            w = a_i / b_prev
+            b_new = b_i - w * c_prev
+            d_new = d_i - w * d_prev
+            return (b_new, d_new, c_i), (b_new, d_new)
+
+        # Initial carry: row 0 (already has BC applied)
+        init_carry = (b[0], d[0], c[0])
+        # Scan over rows 1..N-1
+        _, (b_mod, d_mod) = jax.lax.scan(fwd_step, init_carry,
+                                          (a[1:], b[1:], c[1:], d[1:]))
+        # Prepend row 0
+        b_full = jnp.concatenate([b[0:1], b_mod])
+        d_full = jnp.concatenate([d[0:1], d_mod])
+
+        # Back substitution
+        def bwd_step(x_next, idx):
+            i = Npsi - 2 - idx
+            xi = (d_full[i] - c[i] * x_next) / b_full[i]
+            return xi, xi
+
+        x_last = d_full[-1] / b_full[-1]
+        _, x_inner = jax.lax.scan(bwd_step, x_last, jnp.arange(Npsi - 1))
+        x_inner = x_inner[::-1]
+        x = jnp.concatenate([x_inner, x_last[None]])
+        return x
+
+    # Vectorize Thomas over all modes
+    thomas_vmap = jax.vmap(thomas_single)
+    phi_modes = thomas_vmap(a_diag, b_diag, c_diag, rhs)  # (Nmodes, Npsi)
+
+    # Reshape back to (Ntheta, Nalpha, Npsi) then transpose to (Npsi, Ntheta, Nalpha)
+    phi_hat = phi_modes.reshape(Ntheta, Nalpha, Npsi).transpose(2, 0, 1)
+
+    phi = jnp.fft.ifft2(phi_hat, axes=(1, 2)).real
+    return phi
+
+
+def compute_growth_rate(
+    phi_history: jnp.ndarray,
+    dt: float,
+    n_fit: int = 50,
+) -> dict:
+    """
+    Compute linear growth rate γ and frequency ω from phi time history.
+
+    GTC measures these from the complex mode amplitude φ_real + i·φ_imag.
+    Here we extract the dominant mode from the 3D phi array.
+
+    Parameters
+    ----------
+    phi_history : (n_steps, Npsi, Ntheta, Nalpha)
+    dt          : timestep
+    n_fit       : number of steps to use for linear fit
+
+    Returns
+    -------
+    dict with keys: gamma (growth rate), omega (frequency),
+                    mode_amplitude (array of dominant mode amplitude vs time)
+    """
+    n_steps = phi_history.shape[0]
+
+    # FFT over (Ntheta, Nalpha) for each timestep
+    phi_hat = jnp.fft.fft2(phi_history, axes=(2, 3))  # (n_steps, Npsi, Ntheta, Nalpha)
+
+    # Sum over radial dimension to get mode power: (n_steps, Ntheta, Nalpha)
+    mode_power = jnp.sum(jnp.abs(phi_hat), axis=1)
+
+    # Find dominant mode at last time step (excluding DC)
+    power_last = mode_power[-1]
+    power_last = power_last.at[0, 0].set(0.0)  # zero out DC
+
+    flat_idx = jnp.argmax(power_last)
+    m_dom = flat_idx // phi_history.shape[3]
+    n_dom = flat_idx % phi_history.shape[3]
+
+    # Mode amplitude vs time: sum over psi, pick (m_dom, n_dom)
+    mode_amp = jnp.sum(phi_hat[:, :, m_dom, n_dom], axis=1)  # (n_steps,) complex
+
+    # Use last n_fit points for fitting
+    t_fit = jnp.arange(n_fit) * dt
+    amp_fit = jnp.abs(mode_amp[-n_fit:])
+    log_amp = jnp.log(jnp.maximum(amp_fit, 1e-30))
+
+    # Linear regression: log|A| = gamma*t + const
+    t_mean = jnp.mean(t_fit)
+    log_mean = jnp.mean(log_amp)
+    gamma = jnp.sum((t_fit - t_mean) * (log_amp - log_mean)) / jnp.sum((t_fit - t_mean) ** 2)
+
+    # Omega from phase unwrapping
+    phase = jnp.angle(mode_amp[-n_fit:])
+    dphase = jnp.diff(phase)
+    # Unwrap phase differences
+    dphase = jnp.where(dphase > jnp.pi, dphase - 2 * jnp.pi, dphase)
+    dphase = jnp.where(dphase < -jnp.pi, dphase + 2 * jnp.pi, dphase)
+    omega = jnp.mean(dphase) / dt
+
+    return {
+        'gamma': float(gamma),
+        'omega': float(omega),
+        'mode_amplitude': mode_amp,
+    }
+
+
+def project_modes(phi: jnp.ndarray, n_modes: int = 5) -> dict:
+    """
+    Project phi onto toroidal/poloidal Fourier modes.
+
+    Returns dict mapping (m, n) → complex amplitude.
+    Like GTC's phi_real + i·phi_imag per mode output.
+
+    Parameters
+    ----------
+    phi     : (Npsi, Ntheta, Nalpha)
+    n_modes : number of dominant modes to return
+
+    Returns
+    -------
+    dict mapping (m_idx, n_idx) → complex amplitude (radially summed)
+    """
+    Npsi, Ntheta, Nalpha = phi.shape
+    phi_hat = jnp.fft.fft2(phi, axes=(1, 2))           # (Npsi, Ntheta, Nalpha)
+    mode_amp = jnp.sum(phi_hat, axis=0)                # (Ntheta, Nalpha) — radially integrated
+
+    # Find top n_modes by |amplitude|
+    amp_abs = jnp.abs(mode_amp)
+    flat_indices = jnp.argsort(amp_abs.ravel())[::-1][:n_modes]
+
+    result = {}
+    for idx in flat_indices.tolist():
+        m = idx // Nalpha
+        n = idx % Nalpha
+        result[(m, n)] = complex(mode_amp[m, n])
+    return result
+
+
+@jax.jit
 def solve_poisson_pade_fa(
     delta_n: jnp.ndarray,
     geom: FieldAlignedGeometry,

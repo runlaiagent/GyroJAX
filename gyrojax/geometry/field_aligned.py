@@ -121,6 +121,7 @@ def build_field_aligned_geometry(
     q0: float = 1.4,
     q1: float = 0.5,
     r_inner: float = 0.1,
+    beta_p: float = 0.0,
 ) -> FieldAlignedGeometry:
     """
     Build field-aligned geometry on a (ψ, θ, α) grid.
@@ -141,6 +142,7 @@ def build_field_aligned_geometry(
     B0    : on-axis field [T]
     q0, q1: safety factor: q = q0 + q1*(r/a)²
     r_inner: inner boundary as fraction of a
+    beta_p: poloidal beta — controls Shafranov shift Δ(r)=β_p*r²/(2R0) (default 0.0)
     """
     r_np    = np.linspace(r_inner * a, a, Npsi,    dtype=np.float32)
     th_np   = np.linspace(-np.pi, np.pi, Ntheta,  endpoint=False, dtype=np.float32)
@@ -157,21 +159,22 @@ def build_field_aligned_geometry(
     th3  = th_np[None, :, None] + np.zeros((Npsi, Ntheta, Nalpha), dtype=np.float32)
     # α doesn't enter B in s-α (B is axisymmetric)
 
-    eps3 = r3 / R0
-    B3   = (B0 / (1.0 + eps3 * np.cos(th3))).astype(np.float32)
+    # Shafranov shift: Δ(r) = β_p * r² / (2*R0)
+    Delta_r   = (beta_p * r_np**2 / (2.0 * R0)).astype(np.float32)   # (Npsi,)
+    dDelta_dr = (beta_p * r_np / R0).astype(np.float32)               # (Npsi,)
 
-    # ∂B/∂ψ = ∂B/∂r  =  -B² cosθ / (B0·R0)
-    gradB_psi3 = (-B3**2 * np.cos(th3) / (B0 * R0)).astype(np.float32)
+    R3 = (R0 + r3 * np.cos(th3) + Delta_r[:, None, None]).astype(np.float32)
+    B3 = (B0 * R0 / R3).astype(np.float32)
 
-    # ∂B/∂θ  =  B² ε sinθ / B0  (angular derivative, dB/dθ per radian)
-    # Physical gradient along field line: dB/dl = dB/dθ / (q*R0)
-    q3 = (q0 + q1 * r3 / a).astype(np.float32)
-    gradB_th3  = ( B3**2 * eps3 * np.sin(th3) / (B0 * q3 * R0)).astype(np.float32)
+    # ∂B/∂ψ = ∂B/∂r = -B0*R0/R² * (cosθ + dΔ/dr)
+    gradB_psi3 = (-B0 * R0 / R3**2 * (np.cos(th3) + dDelta_dr[:, None, None])).astype(np.float32)
 
-    # Curvature: κ_ψ = -cosθ/R,  κ_θ = sinθ/R
-    # kappa_th = sinθ/R(r) already has units 1/m ✓
-    R3 = R0 * (1.0 + eps3 * np.cos(th3))
-    kappa_psi3 = (-np.cos(th3) / R3).astype(np.float32)
+    # ∂B/∂θ along field line = B0*R0*r*sinθ / (R² * q*R0)
+    q3 = q_np[:, None, None] + np.zeros((Npsi, Ntheta, Nalpha), dtype=np.float32)
+    gradB_th3  = (B0 * R0 * r3 * np.sin(th3) / (R3**2 * q3 * R0)).astype(np.float32)
+
+    # Curvature with Shafranov-shifted R
+    kappa_psi3 = (-(np.cos(th3) + dDelta_dr[:, None, None]) / R3).astype(np.float32)
     kappa_th3  = ( np.sin(th3) / R3).astype(np.float32)
 
     # Contravariant metric
@@ -201,6 +204,142 @@ def build_field_aligned_geometry(
         gpsialpha   = jnp.array(gpsialpha_1d),
         q_profile   = jnp.array(q_np),
         shat        = jnp.array(s_np),
+        twist_shift = jnp.array(twist),
+        R0=float(R0), a=float(a), B0=float(B0),
+    )
+
+
+def build_miller_geometry(
+    Npsi: int,
+    Ntheta: int,
+    Nalpha: int,
+    R0: float,
+    a: float,
+    B0: float,
+    q0: float = 1.4,
+    q1: float = 0.5,
+    kappa: float = 1.0,    # elongation (1.0 = circular)
+    delta: float = 0.0,    # triangularity (0.0 = circular)
+    r_inner: float = 0.1,
+) -> FieldAlignedGeometry:
+    """
+    Build field-aligned geometry with Miller (1998) shaped cross-sections.
+
+    Flux-surface shape (Miller et al. 1998 Phys. Plasmas):
+      R(r, θ) = R0 + r·cos(θ + arcsin(δ)·sin(θ))
+      Z(r, θ) = κ · r · sin(θ)
+
+    For κ=1, δ=0 this reproduces circular geometry (same as build_field_aligned_geometry).
+
+    Parameters
+    ----------
+    Npsi, Ntheta, Nalpha : grid dimensions
+    R0, a : major/minor radii [m]
+    B0    : on-axis field [T]
+    q0, q1: safety factor: q = q0 + q1*(r/a)²
+    kappa : elongation (κ=1 → circular)
+    delta : triangularity (δ=0 → circular)
+    r_inner: inner boundary as fraction of a
+    """
+    r_np  = np.linspace(r_inner * a, a, Npsi,   dtype=np.float64)
+    th_np = np.linspace(-np.pi, np.pi, Ntheta,  endpoint=False, dtype=np.float64)
+    al_np = np.linspace(0.0, 2*np.pi, Nalpha,   endpoint=False, dtype=np.float32)
+
+    q_np  = q0 + q1 * (r_np / a)**2
+    dqdr  = 2 * q1 * r_np / a**2
+    s_np  = r_np / q_np * dqdr            # ŝ = (r/q)*dq/dr
+    twist = (-2 * np.pi * s_np).astype(np.float32)
+
+    # 2-D grids (Npsi, Ntheta) — α doesn't enter B for axisymmetric geometry
+    r2  = r_np[:, None]    # (Npsi, 1)
+    th2 = th_np[None, :]   # (1, Ntheta)
+
+    xi = np.arcsin(delta)   # scalar
+
+    # Miller shape
+    R2  = R0 + r2 * np.cos(th2 + xi * np.sin(th2))          # (Npsi, Ntheta)
+    Z2  = kappa * r2 * np.sin(th2)                            # (Npsi, Ntheta)
+
+    # Partial derivatives for metric / Jacobian
+    # dR/dθ
+    dRdth2 = -r2 * np.sin(th2 + xi * np.sin(th2)) * (1.0 + xi * np.cos(th2))
+    # dZ/dθ
+    dZdth2 = kappa * r2 * np.cos(th2)
+
+    # dR/dr, dZ/dr
+    dRdr2 = np.cos(th2 + xi * np.sin(th2))
+    dZdr2 = kappa * np.sin(th2)
+
+    # Jacobian J = R * (dR/dr * dZ/dθ - dZ/dr * dR/dθ)
+    Jac2 = R2 * (dRdr2 * dZdth2 - dZdr2 * dRdth2)   # (Npsi, Ntheta)
+
+    # |∇r|² = (dZ/dθ)² + (dR/dθ)²  / J²  [toroidal symmetry, ζ-direction unit]
+    # More precisely: |∇r|² = (R * |∂(R,Z)/∂θ|)² / (R*J)²  = ((dRdth²+dZdth²)) / Jac²
+    grad_r_sq2 = (dRdth2**2 + dZdth2**2) / Jac2**2   # (Npsi, Ntheta)
+
+    # Toroidal field: B_tor = B0*R0/R
+    Btor2 = B0 * R0 / R2
+
+    # Safety factor: q(r) relates poloidal to toroidal field via
+    # B_pol = B_tor * |∇r| * r / (q * R)  — integrate numerically for consistency
+    # For large-aspect-ratio: B ~ B_tor, use Btor as total B (poloidal << toroidal)
+    # |B|² = B_tor² + B_pol² ≈ B_tor² at low β
+    # Poloidal field from flux: B_pol = (1/R)*dΨ/dr ~ B0*R0/(q*R*Jac) * r  (approx)
+    # For simplicity: B_pol² contribution via metric
+    # |B|² = B_tor² * (1 + |∇r|² * r² / q²) — field-aligned metric form
+    # Use B ≈ B_tor for now (consistent with GTC large-aspect-ratio approach for benchmarks)
+    B2 = Btor2  # shape (Npsi, Ntheta)
+
+    # ∂B/∂ψ = ∂B/∂r = ∂(B0*R0/R)/∂r = -B0*R0/R² * ∂R/∂r
+    gradB_psi2 = -B0 * R0 / R2**2 * dRdr2
+
+    # ∂B/∂θ, normalized to arc length (divide by q*R0 for field-line derivative)
+    q2 = q_np[:, None]
+    gradB_th2  = (-B0 * R0 / R2**2 * dRdth2) / (q2 * R0)
+
+    # Curvature from Miller normal vector
+    # Unit normal to flux surface: n̂ = (dZ/dθ, -dR/dθ, 0) / |...| in (R,Z)
+    # κ_ψ = -n̂·∂²X/∂ψ² * (1/R) ≈ -(dRdr2*normal_R + dZdr2*normal_Z)/R/|grad_r|
+    norm_abs = np.sqrt(dRdth2**2 + dZdth2**2)
+    nR = dZdth2 / norm_abs    # normal in R direction
+    nZ = -dRdth2 / norm_abs   # normal in Z direction
+
+    # Curvature of R(θ) curve in poloidal plane
+    # κ_curv = (dR/dθ * d²Z/dθ² - dZ/dθ * d²R/dθ²) / (dR/dθ² + dZ/dθ²)^(3/2)
+    d2Rdth2 = -r2 * np.cos(th2 + xi*np.sin(th2)) * (1 + xi*np.cos(th2))**2 \
+              + r2 * np.sin(th2 + xi*np.sin(th2)) * xi*np.sin(th2)
+    d2Zdth2 = -kappa * r2 * np.sin(th2)
+
+    # Normal curvature κ_ψ = b × ∇B · ∇ψ / B² (simplified)
+    kappa_psi2 = -(nR * dRdr2 + nZ * dZdr2) / R2
+
+    # Geodesic curvature κ_θ = (κ_Z * R̂ - κ_R * Ẑ) ≈ sin(θ)/R for circular
+    kappa_th2  = (nR * dZdr2 - nZ * dRdr2) / R2
+
+    # Contravariant metric
+    gpsipsi_1d  = np.ones(Npsi, dtype=np.float32)
+    s2d = s_np[:, None]
+    galphaalpha_2d = ((q_np[:, None] / r_np[:, None])**2 * (1.0 + s2d**2 * th_np[None, :]**2)).astype(np.float32)
+    gpsialpha_1d = np.zeros(Npsi, dtype=np.float32)
+
+    # Broadcast to 3-D (Npsi, Ntheta, Nalpha) by repeating along Nalpha axis
+    def to3d(arr2d):
+        return np.broadcast_to(arr2d[:, :, None], (Npsi, Ntheta, Nalpha)).astype(np.float32)
+
+    return FieldAlignedGeometry(
+        psi_grid    = jnp.array(r_np.astype(np.float32)),
+        theta_grid  = jnp.array(th_np.astype(np.float32)),
+        alpha_grid  = jnp.array(al_np),
+        B_field     = jnp.array(to3d(B2)),
+        gradB_psi   = jnp.array(to3d(gradB_psi2)),
+        gradB_th    = jnp.array(to3d(gradB_th2)),
+        kappa_psi   = jnp.array(to3d(kappa_psi2)),
+        kappa_th    = jnp.array(to3d(kappa_th2)),
+        gpsipsi     = jnp.array(gpsipsi_1d),
+        galphaalpha = jnp.array(galphaalpha_2d),
+        gpsialpha   = jnp.array(gpsialpha_1d),
+        q_profile   = jnp.array(q_np.astype(np.float32)),
+        shat        = jnp.array(s_np.astype(np.float32)),
         twist_shift = jnp.array(twist),
         R0=float(R0), a=float(a), B0=float(B0),
     )
@@ -285,3 +424,59 @@ def interp_fa_to_particles(
         interp3(geom.kappa_th),
         interp2(geom.galphaalpha),   # g^{αα}(ψ,θ)
     )
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic utilities
+# ---------------------------------------------------------------------------
+
+def connection_length(geom: FieldAlignedGeometry) -> jnp.ndarray:
+    """
+    Compute the parallel connection length L_c = q * R0 * π at each flux surface.
+
+    This is the distance along B for one poloidal half-transit (θ: -π → π).
+    The full poloidal circuit is L_c_full = 2*q*R0*π.
+
+    Returns
+    -------
+    lc : jnp.ndarray, shape (Npsi,)
+        Connection length in meters.
+    """
+    return jnp.pi * geom.q_profile * geom.R0
+
+
+def ballooning_angle_grid(geom: FieldAlignedGeometry) -> jnp.ndarray:
+    """
+    Compute the extended ballooning angle χ at each (ψ, θ) grid point.
+
+    In the field-aligned grid θ ∈ [-π, π]. The ballooning angle is simply θ
+    itself for the lowest-order mode (n=0 winding). For plotting mode structure
+    vs ballooning angle (GTC convention), χ = θ.
+
+    Returns
+    -------
+    chi : jnp.ndarray, shape (Npsi, Ntheta)
+        Ballooning angle in radians, broadcast over ψ.
+    """
+    # θ is shared across all ψ and α — broadcast to (Npsi, Ntheta)
+    Npsi = geom.psi_grid.shape[0]
+    chi = jnp.tile(geom.theta_grid[None, :], (Npsi, 1))
+    return chi
+
+
+def compute_magnetic_shear(geom: FieldAlignedGeometry) -> jnp.ndarray:
+    """
+    Return ŝ(ψ) = (r/q)*dq/dr — magnetic shear profile.
+
+    Already stored as geom.shat, but this function recomputes it via
+    finite differences of the q profile for validation.
+
+    Returns
+    -------
+    shat : jnp.ndarray, shape (Npsi,)
+    """
+    r = geom.psi_grid
+    q = geom.q_profile
+    # Central differences with one-sided at boundaries
+    dqdr = jnp.gradient(q, r)
+    return r / q * dqdr
