@@ -1,23 +1,22 @@
 """
-Full-f gyrokinetic PIC simulation — Phase 3 (revised).
+Full-f gyrokinetic PIC simulation — Phase 3 (true Vlasov PIC).
 
-In full-f, we track the full distribution f rather than just δf = f - f0.
-However, in the *linear* phase, full-f and δf give the same growth rate —
-the difference only shows up nonlinearly (zonal flows, profile relaxation).
+True full-f: each marker carries a CONSTANT weight W_p (characteristic of Vlasov).
+Physics comes entirely from particle motion — not weight evolution.
 
-For the CBC benchmark (linear phase) we use a hybrid approach:
-  - Particles initialized from Maxwellian f0 with equal weights W_p = 1/N
-  - Weight equation: same as δf but for the *full* log-gradient of f
-  - No linearization: the full v_total (not just equilibrium drift) drives weights
-  - Periodic resampling to control variance growth
+Key differences from δf (simulation_fa.py):
+  - NO weight equation (dW/dt = 0)
+  - δn(x) = Σ_p W_p · shape(x-X_p) / ΔV  −  n₀(x)
+  - Initial perturbation seeded via one-time weight or position perturbation
+  - Periodic resampling to control weight variance growth (from phase-space sampling noise)
 
-This gives correct linear growth rates and captures the onset of nonlinearity,
-while being more tractable than a pure counting-based full-f scheme (which
-requires many more particles/cell to resolve δn/n0 ~ 1%).
+In the linear phase, full-f and δf give the same growth rate. Differences appear
+nonlinearly (zonal flows, profile relaxation).
 
 References:
-  Idomura et al. (2008) Nucl. Fusion 48, 035002
-  Bottino & Sonnendrücker (2015) J. Plasma Phys. 81, 435810501
+  Grandgirard et al. (2006) J. Comput. Phys. 217, 395  (GYSELA)
+  Idomura et al. (2008) Nucl. Fusion 48, 035002  (GT5D)
+  Lin & Lee (1995) Phys. Rev. E 52, 5646
 """
 
 from __future__ import annotations
@@ -34,21 +33,21 @@ from gyrojax.geometry.field_aligned import (
 from gyrojax.particles.guiding_center import GCState, init_maxwellian_particles
 from gyrojax.particles.guiding_center_fa import push_particles_fa
 from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa, gather_from_grid_fa
-from gyrojax.fields.poisson_fa import solve_poisson_fa
-from gyrojax.deltaf.weights import update_weights
+from gyrojax.fields.poisson_fa import solve_poisson_fa, filter_single_mode
 from gyrojax.geometry.salpha import build_salpha_geometry
 
 
 @dataclass
 class SimConfigFullF:
+    """Simulation configuration for full-f (Phase 3) run."""
     # Grid
     Npsi:   int = 16
     Ntheta: int = 32
-    Nalpha: int = 16
+    Nalpha: int = 32
     # Particles
     N_particles: int = 200_000
     # Time
-    n_steps: int = 300
+    n_steps: int = 200
     dt:      float = 0.05
     # Geometry
     R0:  float = 1.0
@@ -60,25 +59,36 @@ class SimConfigFullF:
     Ti:  float = 1.0
     Te:  float = 1.0
     mi:  float = 1.0
-    rho_star: float = 1.0 / 180.0  # rho_i/a; CBC standard
-    e:   float = 1000.0   # = 1/rho_star * vti*mi/(a*B0); Omega_i*mi/B0; CBC rho*=1/180 -> Omega=1000
+    rho_star: float = 1.0 / 180.0
+    e:   float = 1000.0
     vti: float = 1.0
     n0_avg: float = 1.0
     # Profiles
     R0_over_LT: float = 6.9
     R0_over_Ln: float = 2.2
+    # ITG seed
+    pert_amp: float = 1e-4
     # Velocity cap
     vpar_cap: float = 4.0
     # Resampling (0 = never)
     resample_interval: int = 50
-    # ITG seed amplitude
-    pert_amp: float = 1e-4
+    # Single-mode filter (linear benchmark)
+    single_mode: bool = False
+    k_mode: int = 18
+    # Collisions (Krook)
+    nu_krook: float = 0.0
+    # Minimum alpha wavenumber to keep
+    k_alpha_min: int = 0
+    # Warmup steps with reduced perturbation
+    n_steps_warmup: int = 0
 
 
 class DiagnosticsFullF(NamedTuple):
-    phi_rms:    jnp.ndarray
-    phi_max:    jnp.ndarray
-    n_rms:      jnp.ndarray
+    phi_rms:       jnp.ndarray
+    phi_max:       jnp.ndarray
+    weight_rms:    jnp.ndarray   # should stay constant in true full-f
+    n_rms:         jnp.ndarray
+    phi_zonal_rms: jnp.ndarray
 
 
 def _resample_particles(
@@ -88,18 +98,33 @@ def _resample_particles(
 ) -> tuple:
     """
     Systematic resampling: replace high-variance weights with equal-weight markers.
-    Preserves the total distribution while reducing weight variance.
+
+    Standard particle resampling (Gingold & Monaghan style):
+      1. Normalize weights → CDF
+      2. Draw uniform random offsets
+      3. Resample indices proportional to weight
+      4. All resampled markers get equal weight W̄ = mean(|W|)
+
+    After resampling: std(W) → 0, positions distributed ∝ |W|.
     """
     N = cfg.N_particles
     W = jnp.abs(state.weight)
-    W_norm = W / (jnp.sum(W) + 1e-30)
+    W_total = jnp.sum(W) + 1e-30
+    W_norm = W / W_total
 
+    # CDF-based systematic resampling
+    cdf = jnp.cumsum(W_norm)
     key, subkey = jax.random.split(key)
-    indices = jax.random.choice(subkey, N, shape=(N,), replace=True, p=W_norm)
+    u0 = jax.random.uniform(subkey, shape=()) / N
+    u = u0 + jnp.arange(N, dtype=jnp.float32) / N
+    # Clamp to [0, 1) for safety
+    u = jnp.clip(u, 0.0, 1.0 - 1e-7)
+    indices = jnp.searchsorted(cdf, u, side='right')
+    indices = jnp.clip(indices, 0, N - 1)
 
-    # Preserve sign of weight
-    signs = jnp.sign(state.weight[indices])
-    new_w = signs * jnp.mean(W)
+    # All resampled markers get equal weight (mean of original)
+    W_mean = W_total / N
+    new_w = jnp.full(N, W_mean, dtype=jnp.float32)
 
     new_state = GCState(
         r=state.r[indices], theta=state.theta[indices],
@@ -107,6 +132,14 @@ def _resample_particles(
         mu=state.mu[indices], weight=new_w,
     )
     return new_state, key
+
+
+def _interp_q(r: jnp.ndarray, geom: FieldAlignedGeometry) -> jnp.ndarray:
+    Nr = geom.psi_grid.shape[0]
+    dr = (geom.psi_grid[-1] - geom.psi_grid[0]) / (Nr - 1)
+    ir = jnp.clip((r - geom.psi_grid[0]) / dr, 0.0, Nr - 1.001)
+    i0 = jnp.floor(ir).astype(jnp.int32)
+    return geom.q_profile[i0]
 
 
 def run_simulation_fullf(
@@ -117,6 +150,8 @@ def run_simulation_fullf(
 ) -> tuple:
     """
     Run full-f gyrokinetic simulation.
+
+    True Vlasov PIC: weights constant, physics from particle motion.
 
     Returns (diags, final_state, final_phi, geom).
     """
@@ -135,47 +170,77 @@ def run_simulation_fullf(
     if verbose:
         print(f"[GyroJAX Full-f] {cfg.N_particles:,} particles, "
               f"grid ({Npsi},{Ntheta},{Nalpha}), {cfg.n_steps} steps, dt={cfg.dt}")
+        print(f"  True full-f: dW/dt=0, δn=scatter(W)-n0")
 
-    # --- Particle initialization ---
+    # --- Build geometry for initial particle sampling ---
     geom_sa = build_salpha_geometry(
         Npsi, Ntheta, Nalpha,
         R0=cfg.R0, a=cfg.a, B0=cfg.B0,
-        q0=float(geom.q_profile[Npsi//2]), q1=0.0,
+        q0=float(geom.q_profile[Npsi // 2]), q1=0.0,
     )
+
+    # --- Initialize particles from Maxwellian f0 ---
     key, subkey = jax.random.split(key)
     state_sa = init_maxwellian_particles(
         cfg.N_particles, geom_sa, cfg.vti, cfg.Ti, cfg.mi, subkey
     )
+    # Transform to field-aligned coordinates
     psi_p, theta_p, alpha_p = salpha_to_fa_coords(
         state_sa.r, state_sa.theta, state_sa.zeta, geom
     )
 
-    # Full-f: seed ITG via initial weight perturbation
-    # w_p = δf/f0 ~ pert_amp * sin(m*θ + n*α) → same as δf init
-    pert = cfg.pert_amp * jnp.sin(2.0 * theta_p + alpha_p)
+    # --- Full-f: uniform weights W_p = n0_avg ---
+    # Since particles are sampled from f0, equal weights → correct n0
+    # scatter_to_grid_fa normalizes so W_p=1 → delta_n ≈ 1 everywhere
+    # → background n0 = n0_avg, so W_p = n0_avg for consistency
+    W0 = jnp.full(cfg.N_particles, cfg.n0_avg, dtype=jnp.float32)
+
+    # --- Seed ITG mode via one-time weight perturbation (t=0 only) ---
+    # After this, weights are CONSTANT (true full-f)
+    pert = cfg.pert_amp * jnp.sin(2.0 * theta_p + jnp.float32(cfg.k_mode) * alpha_p)
+    W_init = W0 * (1.0 + pert)
+
     state = GCState(
         r=psi_p, theta=theta_p, zeta=alpha_p,
         vpar=state_sa.vpar, mu=state_sa.mu,
-        weight=pert,
+        weight=W_init.astype(jnp.float32),
     )
 
-    # Profile gradients (flat — flux-tube approximation)
-    Ln = cfg.R0 / cfg.R0_over_Ln
-    LT = cfg.R0 / cfg.R0_over_LT
-    q_over_m = cfg.e / cfg.mi
+    # Background density: n0_avg (flat in flux-tube approx)
+    n0_background = jnp.float32(cfg.n0_avg)
 
-    phi = jnp.zeros(grid_shape)
+    q_over_m = cfg.e / cfg.mi
+    phi = jnp.zeros(grid_shape, dtype=jnp.float32)
     diags: List[DiagnosticsFullF] = []
 
     for step in range(cfg.n_steps):
 
-        # 1. Scatter δf weights → δn
-        delta_n = scatter_to_grid_fa(state, geom, grid_shape)
+        # 1. Scatter W_p → n(x), compute δn = n - n0
+        #    scatter_to_grid_fa normalizes: W_p=n0_avg → output ≈ n0_avg
+        n_scatter = scatter_to_grid_fa(state, geom, grid_shape)
+        # delta_n: the fluctuation from background
+        delta_n = n_scatter - n0_background
 
-        # 2. Solve GK Poisson
+        # NaN guard
+        if bool(jnp.any(jnp.isnan(delta_n))):
+            if verbose:
+                print(f"  [WARN] NaN in delta_n at step {step}, resetting to zero")
+            delta_n = jnp.zeros_like(delta_n)
+
+        # 2. Solve GK Poisson: δn → φ
         phi = solve_poisson_fa(
             delta_n, geom, cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e
         )
+
+        # Optional single-mode filter (linear benchmark)
+        if cfg.single_mode:
+            phi = filter_single_mode(phi, cfg.k_mode)
+
+        # NaN guard on phi
+        if bool(jnp.any(jnp.isnan(phi))):
+            if verbose:
+                print(f"  [WARN] NaN in phi at step {step}, zeroing")
+            phi = jnp.zeros_like(phi)
 
         # 3. Gather E to particles
         E_psi_p, E_theta_p, E_alpha_p = gather_from_grid_fa(phi, state, geom)
@@ -184,50 +249,53 @@ def run_simulation_fullf(
         B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p, g_aa_p = \
             interp_fa_to_particles(geom, state.r, state.theta, state.zeta)
 
-        # 5. Update weights (full nonlinear — no linearization in vE)
-        n0_p   = jnp.ones_like(state.r) * cfg.n0_avg
-        T_p    = jnp.ones_like(state.r) * cfg.Ti
-        q_p    = jnp.full_like(state.r, cfg.q0)
-        d_ln_n = jnp.full_like(state.r, -1.0 / Ln)
-        d_ln_T = jnp.full_like(state.r, -1.0 / LT)
-
-        state = update_weights(
-            state, E_psi_p, E_theta_p, E_alpha_p, B_p,
-            gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p,
-            q_p, n0_p, T_p, d_ln_n, d_ln_T,
-            q_over_m, cfg.mi, cfg.R0, cfg.dt,
-        )
-
-        # 6. Push GC (RK4)
-        Nr = geom.psi_grid.shape[0]
-        dr_p = (geom.psi_grid[-1] - geom.psi_grid[0]) / (Nr - 1)
-        ir_p = jnp.clip((state.r - geom.psi_grid[0]) / dr_p, 0.0, Nr - 1.001)
-        q_at_p = geom.q_profile[jnp.floor(ir_p).astype(jnp.int32)]
+        # 5. Push GC (RK4) — same as δf pusher
+        q_at_p = _interp_q(state.r, geom)
         state = push_particles_fa(
             state, E_psi_p, E_theta_p, E_alpha_p,
             B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p,
             q_at_p, g_aa_p, q_over_m, cfg.mi, cfg.dt, cfg.R0,
         )
 
-        # Boundary + velocity clamp
+        # 6. Boundary conditions + velocity clamp
         state = state._replace(
-            r=jnp.clip(state.r, geom.psi_grid[0]*1.001, geom.psi_grid[-1]*0.999),
-            vpar=jnp.clip(state.vpar, -cfg.vpar_cap*cfg.vti, cfg.vpar_cap*cfg.vti),
+            r=jnp.clip(state.r, geom.psi_grid[0] * 1.001, geom.psi_grid[-1] * 0.999),
+            vpar=jnp.clip(state.vpar, -cfg.vpar_cap * cfg.vti, cfg.vpar_cap * cfg.vti),
         )
 
-        # 7. Optional resampling
+        # NOTE: NO weight update — true full-f: dW_p/dt = 0
+        # The weights remain constant after initialization.
+
+        # 7. Optional Krook collisions (relax towards Maxwellian via vpar damping)
+        if cfg.nu_krook > 0.0:
+            nu = jnp.float32(cfg.nu_krook * cfg.dt)
+            state = state._replace(
+                vpar=state.vpar * (1.0 - nu),
+            )
+
+        # 8. Periodic resampling to control weight variance
         if cfg.resample_interval > 0 and step > 0 and step % cfg.resample_interval == 0:
             state, key = _resample_particles(state, cfg, key)
 
-        # 8. Diagnostics
-        phi_rms = jnp.sqrt(jnp.mean(phi**2))
+        # 9. Diagnostics
+        phi_rms = jnp.sqrt(jnp.mean(phi ** 2))
         phi_max = jnp.max(jnp.abs(phi))
-        n_rms   = jnp.sqrt(jnp.mean(delta_n**2))
-        diags.append(DiagnosticsFullF(phi_rms=phi_rms, phi_max=phi_max, n_rms=n_rms))
+        n_rms   = jnp.sqrt(jnp.mean(delta_n ** 2))
+        weight_rms = jnp.sqrt(jnp.mean(state.weight ** 2))
+        # Zonal phi: average over theta and alpha
+        phi_zonal = jnp.mean(phi, axis=(1, 2))  # (Npsi,)
+        phi_zonal_rms = jnp.sqrt(jnp.mean(phi_zonal ** 2))
+
+        diags.append(DiagnosticsFullF(
+            phi_rms=phi_rms, phi_max=phi_max,
+            weight_rms=weight_rms, n_rms=n_rms,
+            phi_zonal_rms=phi_zonal_rms,
+        ))
 
         if verbose and step % 50 == 0:
-            w_rms = float(jnp.sqrt(jnp.mean(state.weight**2)))
+            w_rms = float(weight_rms)
             print(f"  step {step:4d}/{cfg.n_steps}  "
-                  f"|φ|_max={float(phi_max):.3e}  |w|_rms={w_rms:.3e}")
+                  f"|φ|_max={float(phi_max):.3e}  |w|_rms={w_rms:.3e}  "
+                  f"δn_rms={float(n_rms):.3e}")
 
     return diags, state, phi, geom
