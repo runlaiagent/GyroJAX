@@ -52,6 +52,12 @@ def _get_trilinear_weights(
     k1  = (k0 + 1) % Nzeta
     wz  = iz - jnp.floor(iz)
 
+    # Ensure weights are float32 (jnp.pi is float64 by default, which would
+    # cause FutureWarning when scattering into a float32 grid).
+    wr = wr.astype(jnp.float32)
+    wt = wt.astype(jnp.float32)
+    wz = wz.astype(jnp.float32)
+
     return i0, i1, j0, j1, k0, k1, wr, wt, wz
 
 

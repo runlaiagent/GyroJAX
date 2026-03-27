@@ -66,6 +66,12 @@ def _trilinear_weights_fa(
     k1   = (k0 + 1) % Nalpha
     wa   = ia - jnp.floor(ia)
 
+    # Ensure weights are float32 (jnp.pi is float64 by default, which would
+    # cause FutureWarning when scattering into a float32 grid).
+    wp = wp.astype(jnp.float32)
+    wt = wt.astype(jnp.float32)
+    wa = wa.astype(jnp.float32)
+
     return i0, i1, j0, j1, k0, k1, wp, wt, wa
 
 
