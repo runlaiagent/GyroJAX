@@ -32,7 +32,7 @@ from gyrojax.geometry.field_aligned import (
 )
 from gyrojax.particles.guiding_center import GCState, init_maxwellian_particles
 from gyrojax.particles.guiding_center_fa import push_particles_fa
-from gyrojax.deltaf.weights import update_weights, update_weights_cn, pullback_weights, soft_weight_damp, spread_weights
+from gyrojax.deltaf.weights import update_weights, update_weights_cn, update_weights_semi_implicit, pullback_weights, soft_weight_damp, spread_weights
 from gyrojax.fields.poisson_fa import solve_poisson_fa, compute_efield_fa, filter_single_mode
 from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa, gather_from_grid_fa
 from gyrojax.geometry.profiles import build_cbc_profiles, interp_profiles, krook_damping
@@ -105,6 +105,7 @@ class SimConfigFA:
     implicit:        bool  = False   # use CN+Picard implicit scheme
     picard_max_iter: int   = 4       # max Picard iterations
     picard_tol:      float = 1e-3    # convergence tolerance on φ (L∞ norm)
+    semi_implicit_weights: bool = False  # semi-implicit CN weight update (no Picard, replaces RK4)
 
 
 class DiagnosticsFA(NamedTuple):
@@ -219,20 +220,27 @@ def step_implicit_fa(
 
         return iter_k + 1, _state_n, _phi_n, state_new, phi_new
 
+    def picard_body_tracked(carry):
+        iter_k, _state_n, _phi_n, _state_k, _phi_k, _phi_prev = carry
+        iter_k1, _sn, _pn, state_new, phi_new = picard_body(
+            (iter_k, _state_n, _phi_n, _state_k, _phi_k)
+        )
+        return iter_k1, _state_n, _phi_n, state_new, phi_new, _phi_k
+
     def picard_cond(carry):
-        iter_k, _state_n, _phi_n, _state_k, _phi_k = carry
-        # Continue if: not converged AND iter < max_iter
+        iter_k, _state_n, _phi_n, _state_k, _phi_k, _phi_prev = carry
         not_max = iter_k < cfg.picard_max_iter
-        # On first iteration (iter_k == 0), phi_k == phi_n so diff = 0 → immediately
-        # "converged" — we need at least 1 body iteration. Use iter_k == 0 as override.
-        diff = jnp.max(jnp.abs(_phi_k - _phi_n))
-        not_converged = (iter_k == 0) | (diff >= cfg.picard_tol)
+        # Compare successive iterates (not against initial)
+        diff = jnp.max(jnp.abs(_phi_k - _phi_prev))
+        not_converged = (iter_k <= 1) | (diff >= cfg.picard_tol)
         return not_max & not_converged
 
-    # Initial carry: state_k = state_n, phi_k = phi_n (0th guess = explicit Euler-like)
-    # Do first iteration unconditionally by starting cond at iter=0 always truthy
-    init_carry = (jnp.array(0), state, phi_n, state, phi_n)
-    _, _, _, state_new, phi_new = jax.lax.while_loop(picard_cond, picard_body, init_carry)
+    # Initial carry: phi_prev = large sentinel so first cond is True
+    phi_sentinel = phi_n + jnp.array(1e10, dtype=jnp.float32)
+    init_carry = (jnp.array(0), state, phi_n, state, phi_n, phi_sentinel)
+    _, _, _, state_new, phi_new, _ = jax.lax.while_loop(
+        picard_cond, picard_body_tracked, init_carry
+    )
 
     return state_new, phi_new, key
 
@@ -678,7 +686,8 @@ def _run_with_geom(
                 d_ln_T_dr  = jnp.full_like(state.r, -1.0 / LT)
                 q_at_r_p   = _interp_q(state.r, geom)
 
-            state = update_weights(
+            _weight_update_fn = update_weights_semi_implicit if cfg.semi_implicit_weights else update_weights
+            state = _weight_update_fn(
                 state,
                 E_psi_p,
                 E_theta_p,

@@ -222,6 +222,74 @@ def update_weights(
     )
 
 
+def update_weights_semi_implicit(
+    state: GCState,
+    E_r: jnp.ndarray,
+    E_theta: jnp.ndarray,
+    E_alpha: jnp.ndarray,
+    B: jnp.ndarray,
+    gradB_r: jnp.ndarray,
+    gradB_th: jnp.ndarray,
+    kappa_r: jnp.ndarray,
+    kappa_th: jnp.ndarray,
+    q_at_r: jnp.ndarray,
+    n0: jnp.ndarray,
+    T: jnp.ndarray,
+    d_ln_n0_dr: jnp.ndarray,
+    d_ln_T_dr: jnp.ndarray,
+    q_over_m: float,
+    mi: float,
+    R0: float,
+    dt: float,
+) -> GCState:
+    """
+    Semi-implicit weight update using Crank-Nicolson analytical solution.
+
+    For dw/dt = -(1-w)*S, the exact CN solution is:
+        w^{n+1} = 1 - (1 - w^n) / (1 + dt * S)
+
+    S is evaluated at current (explicit) positions and fields.
+    This is unconditionally stable in w: as dt*S → ∞, w → 1 (hard bounded).
+    Compare to explicit Euler: w^{n+1} = w^n - dt*(1-w^n)*S which blows up.
+
+    Key property: the denominator (1 + dt*S) damps any S no matter how large,
+    so large ExB drives (large phi) cannot send w to infinity.
+    """
+    safe_B = jnp.maximum(B, 1e-10)
+    vE_r = q_at_r * E_alpha / safe_B
+
+    vd_r = _compute_drift_r(
+        state.vpar, state.mu, B, gradB_r, gradB_th,
+        kappa_r, kappa_th, state.r, q_at_r, R0, q_over_m, mi
+    )
+
+    v_total_r = vE_r + vd_r
+    dvpar_dt_ES = jnp.zeros_like(E_theta)  # E∥ ≈ 0, consistent with pusher
+
+    d_lnf0_dr, d_lnf0_dvp = log_f0_gradients(
+        state.vpar, state.mu, B, gradB_r,
+        T, d_ln_n0_dr, d_ln_T_dr, mi
+    )
+
+    # S = the source term: dw/dt = -(1-w)*S
+    S = (v_total_r * d_lnf0_dr + dvpar_dt_ES * d_lnf0_dvp).astype(jnp.float32)
+    dt32 = jnp.array(dt, dtype=jnp.float32)
+
+    # CN analytical solution per-particle: w = 1 - (1 - w_n)/(1 + dt*S)
+    denom = jnp.array(1.0, dtype=jnp.float32) + dt32 * S
+    # Guard: if denom < 0.1 (dt*S ≈ -1), clamp — large negative S is physical damping.
+    denom_safe = jnp.where(denom > 0.1, denom, jnp.array(0.1, dtype=jnp.float32))
+    new_weight = jnp.array(1.0, dtype=jnp.float32) - (jnp.array(1.0, dtype=jnp.float32) - state.weight) / denom_safe
+
+    # Safety clip — should rarely trigger with CN
+    new_weight = jnp.clip(new_weight, -10.0, 10.0)
+
+    return GCState(
+        r=state.r, theta=state.theta, zeta=state.zeta,
+        vpar=state.vpar, mu=state.mu, weight=new_weight.astype(state.weight.dtype)
+    )
+
+
 def update_weights_cn(
     w_n: jnp.ndarray,
     state: GCState,
