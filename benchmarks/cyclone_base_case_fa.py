@@ -41,22 +41,24 @@ def run_cbc_fa(quick: bool = False):
     print("=" * 70)
 
     if quick:
+        # k_mode=18 → ky·ρi≈0.30 (CBC peak); Nalpha must be > 2*k_mode (Nyquist)
         cfg = SimConfigFA(
-            Npsi=16, Ntheta=32, Nalpha=16,
+            Npsi=16, Ntheta=32, Nalpha=64,
             N_particles=100_000,
             n_steps=400,
             dt=0.05,
-            pert_amp=1e-3,
+            pert_amp=1e-4,
             R0=1.0, a=0.18, B0=1.0,
             q0=1.4, q1=0.5,
             Ti=1.0, Te=1.0, mi=1.0, e=1000.0,
             R0_over_LT=6.9, R0_over_Ln=2.2,
             vti=1.0, n0_avg=1.0,
+            single_mode=True, k_mode=18,
         )
-        print("  [QUICK MODE: reduced resolution, 100k particles, 400 steps]")
+        print("  [QUICK MODE: single mode k=18 (ky·ρi≈0.30), 100k particles, 400 steps]")
     else:
         cfg = SimConfigFA(
-            Npsi=32, Ntheta=64, Nalpha=32,
+            Npsi=32, Ntheta=64, Nalpha=96,
             N_particles=1_000_000,
             n_steps=800,
             dt=0.03,
@@ -66,8 +68,9 @@ def run_cbc_fa(quick: bool = False):
             Ti=1.0, Te=1.0, mi=1.0, e=1000.0,
             R0_over_LT=6.9, R0_over_Ln=2.2,
             vti=1.0, n0_avg=1.0,
+            single_mode=True, k_mode=18,
         )
-        print("  [FULL MODE: 1M particles, 800 steps, dt=0.03]")
+        print("  [FULL MODE: single mode k=18, 1M particles, 800 steps, dt=0.03]")
 
     print(f"\nCBC Parameters:")
     print(f"  R0/LT = {cfg.R0_over_LT},  R0/Ln = {cfg.R0_over_Ln}")
