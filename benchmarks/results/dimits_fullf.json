@@ -1,0 +1,63 @@
+{
+  "scan": [
+    {
+      "R_over_LT": 4.0,
+      "Q_i": 0.98303,
+      "phi_rms": 0.772647,
+      "phi_zonal_rms": 0.312333,
+      "zonal_ratio": 0.4042,
+      "status": "active"
+    },
+    {
+      "R_over_LT": 5.0,
+      "Q_i": 1.02051,
+      "phi_rms": 0.802109,
+      "phi_zonal_rms": 0.326335,
+      "zonal_ratio": 0.4068,
+      "status": "active"
+    },
+    {
+      "R_over_LT": 5.5,
+      "Q_i": 0.98562,
+      "phi_rms": 0.774687,
+      "phi_zonal_rms": 0.3183,
+      "zonal_ratio": 0.4109,
+      "status": "active"
+    },
+    {
+      "R_over_LT": 6.0,
+      "Q_i": 1.0028,
+      "phi_rms": 0.788186,
+      "phi_zonal_rms": 0.321906,
+      "zonal_ratio": 0.4084,
+      "status": "active"
+    },
+    {
+      "R_over_LT": 6.5,
+      "Q_i": 1.0,
+      "phi_rms": 0.785988,
+      "phi_zonal_rms": 0.319043,
+      "zonal_ratio": 0.4059,
+      "status": "active"
+    },
+    {
+      "R_over_LT": 7.0,
+      "Q_i": 0.98073,
+      "phi_rms": 0.770844,
+      "phi_zonal_rms": 0.316664,
+      "zonal_ratio": 0.4108,
+      "status": "active"
+    },
+    {
+      "R_over_LT": 8.0,
+      "Q_i": 1.00865,
+      "phi_rms": 0.792786,
+      "phi_zonal_rms": 0.323466,
+      "zonal_ratio": 0.408,
+      "status": "active"
+    }
+  ],
+  "threshold_found": true,
+  "threshold_RLT": 4.0,
+  "notes": "Q_i is phi_rms normalised to phi_rms at R/LT=6.5 (proxy for heat flux)"
+}
