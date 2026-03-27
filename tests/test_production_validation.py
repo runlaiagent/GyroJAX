@@ -38,7 +38,7 @@ class TestGammaSpectrum:
     def test_ky_rho_estimate_reasonable(self):
         """ky·ρi estimate should be positive and finite for typical Nalpha."""
         for Nalpha in [8, 16, 24, 32]:
-            ky_rho = estimate_ky_rho(Nalpha, a=0.18, rho_i=0.18/180)
+            ky_rho = estimate_ky_rho(Nalpha // 2, 1.4, (0.18/180) / 0.09)
             assert ky_rho > 0, f"ky·ρi={ky_rho} non-positive for Nalpha={Nalpha}"
             assert ky_rho < 2.0, f"ky·ρi={ky_rho} too large for Nalpha={Nalpha}"
 

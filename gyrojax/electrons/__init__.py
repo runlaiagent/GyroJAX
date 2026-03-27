@@ -107,6 +107,7 @@ def push_electrons_dk(
     dt_ion    : ion timestep
     """
     from gyrojax.particles.guiding_center_fa import push_particles_fa
+    from gyrojax.geometry.field_aligned import interp_fa_to_particles
 
     dt_e = dt_ion / e_cfg.subcycles
     q_over_m_e = -1.0 / e_cfg.me_over_mi   # e_charge/me = -e/(me/mi * mi) = -1/me_over_mi
@@ -116,10 +117,21 @@ def push_electrons_dk(
     # Electron vpar cap: 4 * vte
     vpar_cap_e = 4.0 * e_cfg.vte
 
+    # Pre-interpolate geometry fields at current electron positions
+    B_e, gBpsi_e, gBth_e, kpsi_e, kth_e, g_aa_e = interp_fa_to_particles(
+        geom, state_e.r, state_e.theta, state_e.zeta
+    )
+    Nr = geom.psi_grid.shape[0]
+    dr = (geom.psi_grid[-1] - geom.psi_grid[0]) / (Nr - 1)
+    ir = jnp.clip((state_e.r - geom.psi_grid[0]) / dr, 0.0, Nr - 1.001)
+    q_at_e = geom.q_profile[jnp.floor(ir).astype(jnp.int32)]
+
     def one_substep(_, state):
         new_state = push_particles_fa(
             state, E_psi, E_theta, E_alpha,
-            geom, q_over_m_e, e_cfg.me_over_mi, dt_e,
+            B_e, gBpsi_e, gBth_e, kpsi_e, kth_e,
+            q_at_e, g_aa_e,
+            q_over_m_e, e_cfg.me_over_mi, dt_e, geom.R0,
         )
         # Per-substep boundary and velocity clamping to prevent runaway
         return new_state._replace(
@@ -134,6 +146,7 @@ def update_electron_weights(
     state_e: GCState,
     E_psi_e: jnp.ndarray,
     E_theta_e: jnp.ndarray,
+    E_alpha_e: jnp.ndarray,
     B_e: jnp.ndarray,
     gradB_psi_e: jnp.ndarray,
     gradB_th_e: jnp.ndarray,
@@ -170,7 +183,7 @@ def update_electron_weights(
     abs_q_over_m_e = 1.0 / e_cfg.me_over_mi   # positive magnitude
     return update_weights(
         state_e,
-        E_psi_e, E_theta_e,
+        E_psi_e, E_theta_e, E_alpha_e,
         B_e, gradB_psi_e, gradB_th_e, kappa_psi_e, kappa_th_e,
         q_at_r_e,
         n0_e, Te_e,

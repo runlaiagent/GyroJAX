@@ -115,7 +115,7 @@ class TestVMECCompatibilityWithFA:
         th_p = jax.random.uniform(key, (N,), minval=0.0, maxval=2*np.pi)
         al_p = jax.random.uniform(key, (N,), minval=0.0, maxval=float(geom_li383.alpha_grid[-1]))
 
-        B_p, gBs, gBt, kaps, kapt = interp_fa_to_particles(geom_li383, s_p, th_p, al_p)
+        B_p, gBs, gBt, kaps, kapt, _ = interp_fa_to_particles(geom_li383, s_p, th_p, al_p)
         assert B_p.shape == (N,)
         assert not bool(jnp.any(jnp.isnan(B_p)))
         assert float(jnp.min(B_p)) > 0.0

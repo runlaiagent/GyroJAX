@@ -143,24 +143,24 @@ def build_salpha_geometry(
         eps3     = r3 / R0
         R3 = (R0 * (1.0 + eps3 * np.cos(th3))).astype(np.float32)
 
-    B3 = (B0 * R0 / R3).astype(np.float32)
+    B3 = np.broadcast_to((B0 * R0 / R3).astype(np.float32), (Nr, Ntheta, Nzeta)).copy()
 
     # ∂B/∂r : B = B0*R0/R, so ∂B/∂r = -B0*R0/R² * ∂R/∂r
     # ∂R/∂r = cosθ + dΔ/dr  (with Shafranov)  or  cosθ/R0*(R0/R0) ... let's redo cleanly
     # ∂R/∂r = cosθ + dΔ/dr
     dRdr = (np.cos(th3) + dDdr3).astype(np.float32)
-    gradB_r3 = (-B0 * R0 / R3**2 * dRdr).astype(np.float32)
+    gradB_r3 = np.broadcast_to((-B0 * R0 / R3**2 * dRdr).astype(np.float32), (Nr, Ntheta, Nzeta)).copy()
 
     # ∂B/∂θ = -B0*R0/R² * ∂R/∂θ
     # ∂R/∂θ = -r*sinθ
     dRdth = (-r3 * np.sin(th3)).astype(np.float32)
-    gradB_th3 = (-B0 * R0 / R3**2 * dRdth).astype(np.float32)
+    gradB_th3 = np.broadcast_to((-B0 * R0 / R3**2 * dRdth).astype(np.float32), (Nr, Ntheta, Nzeta)).copy()
 
     # Curvature (from Beer et al. 1995, modified for Shafranov):
     # κ_r     = -∂R/∂r / R  =  -(cosθ + dΔ/dr)/R  ≈ -cosθ/R  for small shift
     # κ_theta =  sinθ / R   (geodesic, unchanged to leading order)
-    kappa_r3  = (-(np.cos(th3) + dDdr3) / R3).astype(np.float32)
-    kappa_th3 = ( np.sin(th3) / R3).astype(np.float32)
+    kappa_r3  = np.broadcast_to((-(np.cos(th3) + dDdr3) / R3).astype(np.float32), (Nr, Ntheta, Nzeta)).copy()
+    kappa_th3 = np.broadcast_to(( np.sin(th3) / R3).astype(np.float32), (Nr, Ntheta, Nzeta)).copy()
 
     # Metric
     g_tt_np = (r_np**2).astype(np.float32)

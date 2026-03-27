@@ -91,7 +91,7 @@ class TestElectronWeights:
         """Weight update should produce no NaN."""
         phi, E_psi, E_theta, E_alpha = dummy_fields
         E_psi_e, E_theta_e, E_alpha_e = gather_from_grid_fa(phi, electron_markers, geom)
-        B_e, gBpsi_e, gBth_e, kpsi_e, kth_e = interp_fa_to_particles(
+        B_e, gBpsi_e, gBth_e, kpsi_e, kth_e, _ = interp_fa_to_particles(
             geom, electron_markers.r, electron_markers.theta, electron_markers.zeta
         )
         n0_e = jnp.ones(electron_markers.r.shape)
@@ -101,7 +101,7 @@ class TestElectronWeights:
         q_e = jnp.full_like(electron_markers.r, 1.4)
 
         new_state = update_electron_weights(
-            electron_markers, E_psi_e, E_theta_e,
+            electron_markers, E_psi_e, E_theta_e, E_alpha_e,
             B_e, gBpsi_e, gBth_e, kpsi_e, kth_e,
             q_e, n0_e, Te_e, d_ln_n0, d_ln_Te,
             e_cfg, 1.0, 0.05,
@@ -118,7 +118,7 @@ class TestElectronWeights:
         # Apply radially uniform E_psi perturbation
         E_psi_e = jnp.full(electron_markers.r.shape, 0.1)
         E_theta_e = jnp.zeros_like(E_psi_e)
-        B_e, gBpsi_e, gBth_e, kpsi_e, kth_e = interp_fa_to_particles(
+        B_e, gBpsi_e, gBth_e, kpsi_e, kth_e, _ = interp_fa_to_particles(
             geom, electron_markers.r, electron_markers.theta, electron_markers.zeta
         )
         n0_e = jnp.ones_like(E_psi_e)
@@ -127,12 +127,14 @@ class TestElectronWeights:
         d_ln_Te = jnp.full_like(E_psi_e, -5.0)
         q_e = jnp.full_like(E_psi_e, 1.4)
 
+        E_alpha_e = jnp.zeros_like(E_psi_e)
+
         # Start from zero weights
         state0 = electron_markers._replace(weight=jnp.zeros_like(electron_markers.weight))
 
         # Electron update
         new_e = update_electron_weights(
-            state0, E_psi_e, E_theta_e,
+            state0, E_psi_e, E_theta_e, E_alpha_e,
             B_e, gBpsi_e, gBth_e, kpsi_e, kth_e,
             q_e, n0_e, Te_e, d_ln_n0, d_ln_Te,
             e_cfg, 1.0, 0.05,
@@ -141,7 +143,7 @@ class TestElectronWeights:
         # Ion update with same geometry but positive q/m
         cfg_ion = ElectronConfig(model='drift_kinetic', me_over_mi=1.0, subcycles=1, Te=1.0, vte=1.0)
         new_i = update_electron_weights(
-            state0, E_psi_e, E_theta_e,
+            state0, E_psi_e, E_theta_e, E_alpha_e,
             B_e, gBpsi_e, gBth_e, kpsi_e, kth_e,
             q_e, n0_e, Te_e, d_ln_n0, d_ln_Te,
             cfg_ion, 1.0, 0.05,

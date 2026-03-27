@@ -139,7 +139,7 @@ def ion_heat_flux(
 
     # E×B radial velocity at particle positions
     E_psi, E_theta, E_alpha = gather_from_grid_fa(phi, state, geom)
-    B_p, _, _, _, _ = interp_fa_to_particles(geom, state.r, state.theta, state.zeta)
+    B_p, _, _, _, _, _ = interp_fa_to_particles(geom, state.r, state.theta, state.zeta)
 
     # vE_ψ = -E_θ / B  (radial ExB drift)
     vE_psi = -E_theta / jnp.maximum(B_p, 1e-10)

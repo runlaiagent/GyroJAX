@@ -181,7 +181,7 @@ def run_simulation_fullf(
         E_psi_p, E_theta_p, E_alpha_p = gather_from_grid_fa(phi, state, geom)
 
         # 4. Get B/gradB/curvature at particle positions
-        B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p = \
+        B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p, g_aa_p = \
             interp_fa_to_particles(geom, state.r, state.theta, state.zeta)
 
         # 5. Update weights (full nonlinear — no linearization in vE)
@@ -192,16 +192,21 @@ def run_simulation_fullf(
         d_ln_T = jnp.full_like(state.r, -1.0 / LT)
 
         state = update_weights(
-            state, E_psi_p, E_theta_p, B_p,
+            state, E_psi_p, E_theta_p, E_alpha_p, B_p,
             gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p,
             q_p, n0_p, T_p, d_ln_n, d_ln_T,
-            q_over_m, cfg.mi, cfg.Ti, cfg.dt,
+            q_over_m, cfg.mi, cfg.R0, cfg.dt,
         )
 
         # 6. Push GC (RK4)
+        Nr = geom.psi_grid.shape[0]
+        dr_p = (geom.psi_grid[-1] - geom.psi_grid[0]) / (Nr - 1)
+        ir_p = jnp.clip((state.r - geom.psi_grid[0]) / dr_p, 0.0, Nr - 1.001)
+        q_at_p = geom.q_profile[jnp.floor(ir_p).astype(jnp.int32)]
         state = push_particles_fa(
             state, E_psi_p, E_theta_p, E_alpha_p,
-            geom, q_over_m, cfg.mi, cfg.dt,
+            B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p,
+            q_at_p, g_aa_p, q_over_m, cfg.mi, cfg.dt, cfg.R0,
         )
 
         # Boundary + velocity clamp

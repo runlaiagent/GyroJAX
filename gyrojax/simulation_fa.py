@@ -487,7 +487,6 @@ def _run_with_geom(
             E_psi_p,
             E_theta_p,
             E_alpha_p,
-            g_aa_p,
             B_p,
             gradB_psi_p,
             gradB_th_p,
@@ -526,7 +525,7 @@ def _run_with_geom(
                 d_lnTe_e = jnp.full_like(new_e_markers.r, -1.0 / LT)
                 q_e = _interp_q(new_e_markers.r, geom)
             new_e_markers = update_electron_weights(
-                new_e_markers, E_psi_e, E_theta_e,
+                new_e_markers, E_psi_e, E_theta_e, E_alpha_e,
                 B_e, gBpsi_e, gBth_e, kpsi_e, kth_e,
                 q_e, n0_e, Te_e_p,
                 d_lnn0_e, d_lnTe_e,
