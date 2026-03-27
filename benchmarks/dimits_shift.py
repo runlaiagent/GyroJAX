@@ -36,7 +36,7 @@ COMMON = dict(
     Npsi=24 if HIRES else 16,
     Ntheta=48 if HIRES else 32,
     Nalpha=48 if HIRES else 32,
-    N_particles=1_000_000 if HIRES else 200_000,
+    N_particles=1_000_000 if HIRES else 300_000,
     n_steps=800 if HIRES else 600,
     dt=0.05,
     R0=1.0, a=0.18, B0=1.0, q0=1.4, q1=0.5,
@@ -45,10 +45,12 @@ COMMON = dict(
     vti=1.0, n0_avg=1.0,
     pert_amp=1e-4,
     single_mode=False,
-    k_alpha_min=2,   # suppress k=1 alpha mode to prevent aliasing blowup
+    k_alpha_min=4,   # suppress k<4 alpha modes (near-zero FLR → runaway phi)
+    # Krook collision damping — mild rate keeps weights bounded without killing zonal flows
+    nu_krook=0.005,
     # δf noise control improvements
     canonical_loading=True,
-    use_pullback=True,
+    use_pullback=False,    # pullback impl needs fixing — destabilizes at fire interval
     pullback_interval=50,
     nu_soft=0.01,
     w_sat=2.0,
