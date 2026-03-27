@@ -1,0 +1,127 @@
+{
+  "config": {
+    "Npsi": 12,
+    "Ntheta": 24,
+    "Nalpha": 24,
+    "N_particles": 200000,
+    "n_steps": 400,
+    "dt": 0.05,
+    "R0": 1.0,
+    "a": 0.18,
+    "B0": 1.0,
+    "q0": 1.4,
+    "q1": 0.5,
+    "Ti": 1.0,
+    "Te": 1.0,
+    "mi": 1.0,
+    "e": 1000.0,
+    "R0_over_Ln": 2.2,
+    "vti": 1.0,
+    "n0_avg": 1.0,
+    "pert_amp": 0.0001,
+    "single_mode": false,
+    "k_alpha_min": 4,
+    "nu_krook": 0.005,
+    "canonical_loading": true,
+    "use_pullback": true,
+    "pullback_interval": 50,
+    "nu_soft": 0.01,
+    "w_sat": 2.0,
+    "soft_damp_alpha": 2,
+    "use_weight_spread": true,
+    "weight_spread_interval": 10,
+    "semi_implicit_weights": true,
+    "rlt_values": [
+      4.0,
+      5.0,
+      6.0,
+      6.5,
+      6.9,
+      7.5,
+      8.0
+    ]
+  },
+  "results": [
+    {
+      "rlt": 4.0,
+      "w_rms": 3.718634605407715,
+      "phi_avg": 2.6021098316854583,
+      "Q_i_proxy": 2.6021098316854583,
+      "Q_i_actual": 9.437436613245012,
+      "zonal_rms": 0.1721865243754092,
+      "zonal_phi_avg": 0.22483707177441373,
+      "turb_avg": 0.4399791396516928,
+      "status": "active"
+    },
+    {
+      "rlt": 5.0,
+      "w_rms": 3.9631130695343018,
+      "phi_avg": 2.645251731224091,
+      "Q_i_proxy": 2.645251731224091,
+      "Q_i_actual": 12.973257513220469,
+      "zonal_rms": 0.2659855971599222,
+      "zonal_phi_avg": 0.25583930606557,
+      "turb_avg": 0.4730462596670659,
+      "status": "active"
+    },
+    {
+      "rlt": 6.0,
+      "w_rms": 4.076247215270996,
+      "phi_avg": 2.8077720478935544,
+      "Q_i_proxy": 2.8077720478935544,
+      "Q_i_actual": 7.201772469897035,
+      "zonal_rms": 0.27211003601832595,
+      "zonal_phi_avg": 0.2860562000280711,
+      "turb_avg": 0.5170227821107857,
+      "status": "active"
+    },
+    {
+      "rlt": 6.5,
+      "w_rms": 4.17520809173584,
+      "phi_avg": 2.778388174784687,
+      "Q_i_proxy": 2.778388174784687,
+      "Q_i_actual": -7.205417874362492,
+      "zonal_rms": 0.4265084761875357,
+      "zonal_phi_avg": 0.314895341194305,
+      "turb_avg": 0.5162905682399858,
+      "status": "active"
+    },
+    {
+      "rlt": 6.9,
+      "w_rms": 4.182676792144775,
+      "phi_avg": 2.7739610886222206,
+      "Q_i_proxy": 2.7739610886222206,
+      "Q_i_actual": -0.6690375823718404,
+      "zonal_rms": 0.35992957696357875,
+      "zonal_phi_avg": 0.31257267514919435,
+      "turb_avg": 0.50819999644722,
+      "status": "active"
+    },
+    {
+      "rlt": 7.5,
+      "w_rms": 4.214753150939941,
+      "phi_avg": 2.8173788348272724,
+      "Q_i_proxy": 2.8173788348272724,
+      "Q_i_actual": 18.62430244015798,
+      "zonal_rms": 0.24664360889928527,
+      "zonal_phi_avg": 0.32469593474133174,
+      "turb_avg": 0.5200005560026193,
+      "status": "active"
+    },
+    {
+      "rlt": 8.0,
+      "w_rms": 4.199192523956299,
+      "phi_avg": 2.7310860145951468,
+      "Q_i_proxy": 2.7310860145951468,
+      "Q_i_actual": 6.214509228859123,
+      "zonal_rms": 0.37224533721560255,
+      "zonal_phi_avg": 0.3346910631911008,
+      "turb_avg": 0.5185259992602619,
+      "status": "active"
+    }
+  ],
+  "notes": [
+    "w_rms > 1 indicates delta-f approximation breakdown",
+    "Physics signal may still be present if phi_avg is monotonic in R/LT"
+  ]
+}
