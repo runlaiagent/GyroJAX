@@ -22,14 +22,22 @@ sys.path.insert(0, "/home/blues/wlhx/GyroJAX")
 from gyrojax.simulation_fa import SimConfigFA, run_simulation_fa
 from gyrojax.diagnostics import ion_heat_flux, extract_zonal_flow
 
+import argparse
+_parser = argparse.ArgumentParser()
+_parser.add_argument('--hires', action='store_true', help='High-resolution run: 1M particles, finer grid')
+_args = _parser.parse_args()
+HIRES = _args.hires
+
 # Scan points
 RLT_VALUES = [4.0, 5.0, 6.0, 6.9, 8.0]
 
 # Common CBC parameters
 COMMON = dict(
-    Npsi=16, Ntheta=32, Nalpha=32,
-    N_particles=200_000,
-    n_steps=600,
+    Npsi=24 if HIRES else 16,
+    Ntheta=48 if HIRES else 32,
+    Nalpha=48 if HIRES else 32,
+    N_particles=1_000_000 if HIRES else 200_000,
+    n_steps=800 if HIRES else 600,
     dt=0.05,
     R0=1.0, a=0.18, B0=1.0, q0=1.4, q1=0.5,
     Ti=1.0, Te=1.0, mi=1.0, e=1000.0,
@@ -53,7 +61,7 @@ BLOWUP_STEPS = 100   # check after first N steps
 results = []
 
 print("=" * 70)
-print("GyroJAX Dimits Shift Benchmark")
+print("GyroJAX Dimits Shift Benchmark" + (" [HIGH-RES: 1M particles, 24×48×48]" if HIRES else ""))
 print("Cyclone Base Case — nonlinear R/LT scan")
 print("k_alpha_min=2: suppressing k_alpha=1 aliased mode")
 print("=" * 70)
@@ -164,3 +172,5 @@ else:
         print("\nResult: FAIL ✗")
 
 print()
+# ── CLI for high-res mode ──────────────────────────────────────────────────
+# (already executed above; this block is unreachable — use dimits_shift_hires.py)
