@@ -188,13 +188,14 @@ def update_weights(
     # Total radial drift in weight equation
     v_total_r = vE_r + vd_r
 
-    # E∥ = E_theta in field-aligned coords (θ is the parallel direction)
-    # The parallel force q/m * E∥ drives Landau damping and parallel resonance.
-    # In s-α / field-aligned coords the parallel electric field component is
-    # approximated by E_theta (the theta-direction field along field lines).
-    # For electrostatic perpendicular modes this is small but non-zero and is
-    # important for kinetic electron corrections and energy conservation.
-    dvpar_dt_ES = q_over_m * E_theta   # E_par = E_theta in FA coords
+    # E∥ in field-aligned coords: the guiding-center pusher neglects E∥
+    # (perpendicular modes, E∥ ≈ 0).  Using E_theta here as a proxy for E∥
+    # is INCONSISTENT with the pusher and causes spurious amplification
+    # proportional to q_over_m (= e = 1000 for high-e runs).  For zonal
+    # initial conditions the exact E∥ = 0, but numerical noise in E_theta
+    # gets multiplied by 1000, blowing up the weights.  Set dvpar_dt_ES = 0
+    # to match the pusher (which already omits E∥).
+    dvpar_dt_ES = jnp.zeros_like(E_theta)   # E∥ ≈ 0; keep consistent with pusher
 
     d_lnf0_dr, d_lnf0_dvp = log_f0_gradients(
         state.vpar, state.mu, B, gradB_r,
