@@ -222,6 +222,71 @@ def update_weights(
     )
 
 
+def update_weights_cn(
+    w_n: jnp.ndarray,
+    state: GCState,
+    E_r: jnp.ndarray,
+    E_theta: jnp.ndarray,
+    E_alpha: jnp.ndarray,
+    B: jnp.ndarray,
+    gradB_r: jnp.ndarray,
+    gradB_th: jnp.ndarray,
+    kappa_r: jnp.ndarray,
+    kappa_th: jnp.ndarray,
+    q_at_r: jnp.ndarray,
+    n0: jnp.ndarray,
+    T: jnp.ndarray,
+    d_ln_n0_dr: jnp.ndarray,
+    d_ln_T_dr: jnp.ndarray,
+    q_over_m: float,
+    mi: float,
+    R0: float,
+    dt: float,
+) -> jnp.ndarray:
+    """
+    Crank-Nicolson weight update (analytically solved per-particle).
+
+    For the weight equation dw/dt = -(1-w)*S, the CN scheme gives:
+        w^{n+1} = 1 - (1 - w^n) / (1 + dt * S^{n+½})
+
+    where S = vdrift_r * d_lnf0_dr is evaluated with half-step fields
+    at the initial particle positions.
+
+    This is stable: as dt*S → ∞, w → 1 (bounded above by 1).
+    Safety clip to [-10, 10] prevents blow-up in the negative direction.
+
+    Parameters mirror update_weights; fields should be at the half-step
+    (i.e. averaged between t^n and the current Picard guess for t^{n+1}).
+    """
+    safe_B = jnp.maximum(B, 1e-10)
+    vE_r = q_at_r * E_alpha / safe_B
+
+    vd_r = _compute_drift_r(
+        state.vpar, state.mu, B, gradB_r, gradB_th,
+        kappa_r, kappa_th, state.r, q_at_r, R0, q_over_m, mi,
+    )
+
+    v_total_r = vE_r + vd_r
+    dvpar_dt_ES = jnp.zeros_like(E_theta)  # E∥ ≈ 0 (consistent with pusher)
+
+    d_lnf0_dr, d_lnf0_dvp = log_f0_gradients(
+        state.vpar, state.mu, B, gradB_r, T, d_ln_n0_dr, d_ln_T_dr, mi
+    )
+
+    # S: weight-independent part of RHS/(-(1-w))
+    S = v_total_r * d_lnf0_dr + dvpar_dt_ES * d_lnf0_dvp
+
+    # CN analytical solution: w^{n+1} = 1 - (1 - w^n) / (1 + dt*S)
+    denom = 1.0 + dt * S
+    # Avoid division by zero or sign flip (denom near zero → very large step)
+    denom_safe = jnp.where(jnp.abs(denom) > 1e-6, denom, jnp.sign(denom + 1e-30) * 1e-6)
+    w_new = 1.0 - (1.0 - w_n) / denom_safe
+
+    # Safety clip: prevents unbounded growth in negative direction
+    w_new = jnp.clip(w_new, -10.0, 10.0)
+    return w_new.astype(w_n.dtype)
+
+
 def pullback_weights(
     weight: jnp.ndarray,
     r: jnp.ndarray,

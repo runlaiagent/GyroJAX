@@ -32,7 +32,7 @@ from gyrojax.geometry.field_aligned import (
 )
 from gyrojax.particles.guiding_center import GCState, init_maxwellian_particles
 from gyrojax.particles.guiding_center_fa import push_particles_fa
-from gyrojax.deltaf.weights import update_weights, pullback_weights, soft_weight_damp, spread_weights
+from gyrojax.deltaf.weights import update_weights, update_weights_cn, pullback_weights, soft_weight_damp, spread_weights
 from gyrojax.fields.poisson_fa import solve_poisson_fa, compute_efield_fa, filter_single_mode
 from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa, gather_from_grid_fa
 from gyrojax.geometry.profiles import build_cbc_profiles, interp_profiles, krook_damping
@@ -101,6 +101,10 @@ class SimConfigFA:
     me_over_mi:     float = 1.0/1836.0
     subcycles_e:    int   = 10
     N_electrons:    int   = 0           # 0 = same as N_particles
+    # Implicit time-stepping (Crank-Nicolson + Picard iteration)
+    implicit:        bool  = False   # use CN+Picard implicit scheme
+    picard_max_iter: int   = 4       # max Picard iterations
+    picard_tol:      float = 1e-3    # convergence tolerance on φ (L∞ norm)
 
 
 class DiagnosticsFA(NamedTuple):
@@ -128,6 +132,109 @@ def _interp_q(r: jnp.ndarray, geom: FieldAlignedGeometry) -> jnp.ndarray:
     ir  = jnp.clip((r - geom.psi_grid[0]) / dr, 0.0, Nr - 1.001)
     i0  = jnp.floor(ir).astype(jnp.int32)
     return geom.q_profile[i0]
+
+
+def step_implicit_fa(
+    state: "GCState",
+    phi_n: jnp.ndarray,
+    geom: "FieldAlignedGeometry",
+    cfg: "SimConfigFA",
+    key: jax.random.PRNGKey,
+    scatter_fn=None,
+) -> tuple:
+    """
+    One implicit time step using Crank-Nicolson + Picard iteration.
+
+    Algorithm:
+      Initialize: state_k = state_n, phi_k = phi_n
+      Picard loop (via jax.lax.while_loop):
+        1. phi_half = 0.5*(phi_n + phi_k)
+        2. Gather E from phi_half
+        3. Push particles (full dt, half-step fields) → state_new
+        4. Update weights with CN formula using half-step fields/positions
+        5. Deposit → solve Poisson → phi_new
+        6. Check convergence: ||phi_new - phi_k||_∞ < picard_tol
+      Return converged (state_new, phi_new).
+
+    Returns (state_new, phi_new, key).
+    """
+    from gyrojax.geometry.field_aligned import interp_fa_to_particles
+    from gyrojax.particles.guiding_center_fa import push_particles_fa
+    from gyrojax.fields.poisson_fa import solve_poisson_fa
+    from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa, gather_from_grid_fa
+
+    Npsi, Ntheta, Nalpha = phi_n.shape
+    _gs = (int(Npsi), int(Ntheta), int(Nalpha))
+    q_over_m = cfg.e / cfg.mi
+    Ln = cfg.R0 / cfg.R0_over_Ln if cfg.R0_over_Ln != 0.0 else float('inf')
+    LT = cfg.R0 / cfg.R0_over_LT if cfg.R0_over_LT != 0.0 else float('inf')
+
+    # Precompute geometry at initial positions (constant across Picard iters)
+    B_p, gBpsi_p, gBth_p, kpsi_p, kth_p, g_aa_p = interp_fa_to_particles(
+        geom, state.r, state.theta, state.zeta
+    )
+    q_at_r_p = _interp_q(state.r, geom)
+    n0_p, T_p = _get_profiles(state.r, cfg)
+    d_ln_n0_dr = jnp.full(state.r.shape, -1.0 / Ln, dtype=jnp.float32)
+    d_ln_T_dr  = jnp.full(state.r.shape, -1.0 / LT, dtype=jnp.float32)
+
+    def picard_body(carry):
+        iter_k, _state_n, _phi_n, _state_k, _phi_k = carry
+
+        # 1. Half-step phi
+        phi_half = 0.5 * (_phi_n + _phi_k)
+
+        # 2. Gather E from half-step phi
+        state_gather = _state_n._replace(zeta=_state_n.zeta % (2 * jnp.pi))
+        E_psi_h, E_theta_h, E_alpha_h = gather_from_grid_fa(phi_half, state_gather, geom)
+
+        # 3. Push particles from t^n with half-step fields
+        state_new = push_particles_fa(
+            _state_n, E_psi_h, E_theta_h, E_alpha_h,
+            B_p, gBpsi_p, gBth_p, kpsi_p, kth_p, q_at_r_p, g_aa_p,
+            q_over_m, cfg.mi, cfg.dt, geom.R0,
+        )
+        # Clamp positions and velocity
+        state_new = state_new._replace(
+            r=jnp.clip(state_new.r, geom.psi_grid[0] * 1.001, geom.psi_grid[-1] * 0.999),
+            vpar=jnp.clip(state_new.vpar, -cfg.vpar_cap * cfg.vti, cfg.vpar_cap * cfg.vti),
+        )
+
+        # 4. CN weight update using half-step fields at t^n positions
+        w_new = update_weights_cn(
+            _state_n.weight,
+            _state_n,           # positions/vpar for S evaluation
+            E_psi_h, E_theta_h, E_alpha_h,
+            B_p, gBpsi_p, gBth_p, kpsi_p, kth_p,
+            q_at_r_p, n0_p, T_p,
+            d_ln_n0_dr, d_ln_T_dr,
+            q_over_m, cfg.mi, cfg.R0, cfg.dt,
+        )
+        state_new = state_new._replace(weight=w_new)
+
+        # 5. Deposit and solve Poisson
+        state_fa_new = state_new._replace(zeta=state_new.zeta % (2 * jnp.pi))
+        delta_n_new = scatter_to_grid_fa(state_fa_new, geom, _gs) * cfg.n0_avg
+        phi_new = solve_poisson_fa(delta_n_new, geom, cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e)
+
+        return iter_k + 1, _state_n, _phi_n, state_new, phi_new
+
+    def picard_cond(carry):
+        iter_k, _state_n, _phi_n, _state_k, _phi_k = carry
+        # Continue if: not converged AND iter < max_iter
+        not_max = iter_k < cfg.picard_max_iter
+        # On first iteration (iter_k == 0), phi_k == phi_n so diff = 0 → immediately
+        # "converged" — we need at least 1 body iteration. Use iter_k == 0 as override.
+        diff = jnp.max(jnp.abs(_phi_k - _phi_n))
+        not_converged = (iter_k == 0) | (diff >= cfg.picard_tol)
+        return not_max & not_converged
+
+    # Initial carry: state_k = state_n, phi_k = phi_n (0th guess = explicit Euler-like)
+    # Do first iteration unconditionally by starting cond at iter=0 always truthy
+    init_carry = (jnp.array(0), state, phi_n, state, phi_n)
+    _, _, _, state_new, phi_new = jax.lax.while_loop(picard_cond, picard_body, init_carry)
+
+    return state_new, phi_new, key
 
 
 def _run_with_geom(
@@ -299,7 +406,8 @@ def _run_with_geom(
     use_scan = (
         cfg.electron_model == 'adiabatic' and
         cfg.collision_model == 'none' and
-        not cfg.use_weight_spread   # weight spreading needs Python for-loop
+        not cfg.use_weight_spread and   # weight spreading needs Python for-loop
+        not cfg.implicit                # implicit scheme uses lax.while_loop — use Python loop
     )
 
     if use_scan:
@@ -535,55 +643,60 @@ def _run_with_geom(
         )
         q_at_r_p = _interp_q(state.r, geom)
 
-        # 4. Push guiding centers (RK4)
-        state = push_particles_fa(
-            state, E_psi_p, E_theta_p, E_alpha_p,
-            B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p, q_at_r_p, g_aa_p,
-            q_over_m, cfg.mi, cfg.dt, geom.R0,
-        )
-
-        # Radial boundary clamp (absorbing wall)
-        state = state._replace(
-            r=jnp.clip(state.r, geom.psi_grid[0]*1.001, geom.psi_grid[-1]*0.999)
-        )
-
-        # Velocity cap (δf validity)
-        state = state._replace(
-            vpar=jnp.clip(state.vpar, -cfg.vpar_cap * cfg.vti, cfg.vpar_cap * cfg.vti)
-        )
-
-        # 5. Update δf weights
-        if cfg.use_global and global_profiles is not None:
-            # Global mode: per-particle profiles from radial interpolation
-            n0_p, T_p, _Te_p, q_at_r_p, d_ln_n0_dr, d_ln_T_dr = interp_profiles(
-                global_profiles, state.r
-            )
+        if cfg.implicit:
+            # ---- Crank-Nicolson + Picard implicit step ----
+            state, phi, key = step_implicit_fa(state, phi, geom, cfg, key, scatter_fn=scatter_fn)
         else:
-            # Flux-tube mode: constant-gradient profiles (original behavior)
-            n0_p, T_p = _get_profiles(state.r, cfg)
-            d_ln_n0_dr = jnp.full_like(state.r, -1.0 / Ln)
-            d_ln_T_dr  = jnp.full_like(state.r, -1.0 / LT)
-            q_at_r_p   = _interp_q(state.r, geom)
+            # ---- Explicit RK4 step ----
+            # 4. Push guiding centers (RK4)
+            state = push_particles_fa(
+                state, E_psi_p, E_theta_p, E_alpha_p,
+                B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p, q_at_r_p, g_aa_p,
+                q_over_m, cfg.mi, cfg.dt, geom.R0,
+            )
 
-        state = update_weights(
-            state,
-            E_psi_p,
-            E_theta_p,
-            E_alpha_p,
-            B_p,
-            gradB_psi_p,
-            gradB_th_p,
-            kappa_psi_p,
-            kappa_th_p,
-            q_at_r_p,
-            n0_p, T_p,
-            d_ln_n0_dr, d_ln_T_dr,
-            q_over_m, cfg.mi, cfg.R0, cfg.dt,
-        )
+            # Radial boundary clamp (absorbing wall)
+            state = state._replace(
+                r=jnp.clip(state.r, geom.psi_grid[0]*1.001, geom.psi_grid[-1]*0.999)
+            )
 
-        # Apply Krook damping in buffer zones (global mode only)
-        if cfg.use_global and global_profiles is not None:
-            state = krook_damping(state, global_profiles, cfg.dt)
+            # Velocity cap (δf validity)
+            state = state._replace(
+                vpar=jnp.clip(state.vpar, -cfg.vpar_cap * cfg.vti, cfg.vpar_cap * cfg.vti)
+            )
+
+            # 5. Update δf weights
+            if cfg.use_global and global_profiles is not None:
+                # Global mode: per-particle profiles from radial interpolation
+                n0_p, T_p, _Te_p, q_at_r_p, d_ln_n0_dr, d_ln_T_dr = interp_profiles(
+                    global_profiles, state.r
+                )
+            else:
+                # Flux-tube mode: constant-gradient profiles (original behavior)
+                n0_p, T_p = _get_profiles(state.r, cfg)
+                d_ln_n0_dr = jnp.full_like(state.r, -1.0 / Ln)
+                d_ln_T_dr  = jnp.full_like(state.r, -1.0 / LT)
+                q_at_r_p   = _interp_q(state.r, geom)
+
+            state = update_weights(
+                state,
+                E_psi_p,
+                E_theta_p,
+                E_alpha_p,
+                B_p,
+                gradB_psi_p,
+                gradB_th_p,
+                kappa_psi_p,
+                kappa_th_p,
+                q_at_r_p,
+                n0_p, T_p,
+                d_ln_n0_dr, d_ln_T_dr,
+                q_over_m, cfg.mi, cfg.R0, cfg.dt,
+            )
+
+            # Apply Krook damping in buffer zones (global mode only)
+            if cfg.use_global and global_profiles is not None:
+                state = krook_damping(state, global_profiles, cfg.dt)
 
         # Soft amplitude-dependent weight damping
         if cfg.nu_soft > 0.0:
