@@ -593,15 +593,23 @@ def _run_with_geom(
         # Pullback transformation every pullback_interval steps
         if cfg.use_pullback and cfg.pullback_interval > 0 and step % cfg.pullback_interval == 0:
             n0_r0_p, T_r0_p = _get_profiles(r0_init, cfg)
-            B_p_scalar = float(geom.B0)
+            # Interpolate B at reference positions — use B0 scalar since we
+            # don't store theta0; the dominant pullback correction is radial (n0, T).
+            # Use same B for both f0_old and f0_new so μ*B terms cancel exactly.
+            B0_ref_p = jnp.full_like(r0_init, geom.B0)
+            B_p_for_pullback = jnp.full_like(state.r, geom.B0)
+            B0_ref_p = B0_ref_p.astype(jnp.float32)
             w_pb = pullback_weights(
                 state.weight, state.r, state.vpar, state.mu,
                 r0_init, vpar0_init, mu0_init,
-                B_p, B_p_scalar,
+                B_p_for_pullback, B0_ref_p,
                 n0_p, T_p, n0_r0_p, T_r0_p, cfg.mi,
             )
             state = state._replace(weight=w_pb.astype(jnp.float32))
-            state = state._replace(weight=10.0 * jnp.tanh(state.weight / 10.0))
+            # Update reference positions to current positions (rolling pullback)
+            r0_init    = state.r.copy()
+            vpar0_init = state.vpar.copy()
+            mu0_init   = state.mu.copy()
 
         # 6b. Collisions
         state, key = apply_collisions(state, B_p, cfg, cfg.dt, key)

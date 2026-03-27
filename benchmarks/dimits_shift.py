@@ -50,7 +50,7 @@ COMMON = dict(
     nu_krook=0.005,
     # δf noise control improvements
     canonical_loading=True,
-    use_pullback=False,    # pullback impl needs fixing — destabilizes at fire interval
+    use_pullback=True,
     pullback_interval=50,
     nu_soft=0.01,
     w_sat=2.0,
@@ -164,7 +164,7 @@ for r in results:
 
     flag = ""
     if status == 'ok' and not np.isnan(qi):
-        if qi > 0.02 and dimits_threshold is None:
+        if qi > 1.0 and dimits_threshold is None:   # threshold: Q_i > 1 gyroBohm unit
             dimits_threshold = rlt
             flag = "  ← THRESHOLD"
 

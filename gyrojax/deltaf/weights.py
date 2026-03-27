@@ -231,7 +231,7 @@ def pullback_weights(
     vpar0: jnp.ndarray,
     mu0: jnp.ndarray,
     B: jnp.ndarray,
-    B0_scalar: float,
+    B0: jnp.ndarray,
     n0_r: jnp.ndarray,
     T_r: jnp.ndarray,
     n0_r0: jnp.ndarray,
@@ -243,12 +243,20 @@ def pullback_weights(
 
     Adjusts weights so that f = f0_new * (1 - w_new) = f0_old * (1 - w_old).
     w_new = 1 - (f0_old/f0_new) * (1 - w_old)
+
+    B0 should be the interpolated B at the reference positions r0 (not a scalar),
+    so the μ*B term is consistent between f0_old and f0_new.
     """
     f0_new = maxwellian_f0(vpar, mu, B, n0_r, T_r, mi)
-    f0_old = maxwellian_f0(vpar0, mu0, jnp.full_like(mu0, B0_scalar), n0_r0, T_r0, mi)
-    ratio = f0_old / (f0_new + 1e-30)
-    ratio = jnp.clip(ratio, 0.01, 100.0)   # prevent extreme corrections
+    f0_old = maxwellian_f0(vpar0, mu0, B0, n0_r0, T_r0, mi)
+    # Use log-ratio for numerical stability
+    log_ratio = jnp.log(f0_old + 1e-300) - jnp.log(f0_new + 1e-300)
+    # Clip log-ratio: allow at most factor of 3 correction per pullback
+    log_ratio = jnp.clip(log_ratio, -1.1, 1.1)
+    ratio = jnp.exp(log_ratio)
     w_new = 1.0 - ratio * (1.0 - weight)
+    # Safety: if w_new would be larger in magnitude than w_old, don't apply
+    w_new = jnp.where(jnp.abs(w_new) < jnp.abs(weight) + 0.1, w_new, weight)
     return w_new.astype(weight.dtype)
 
 
