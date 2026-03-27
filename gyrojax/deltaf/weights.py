@@ -222,6 +222,44 @@ def update_weights(
     )
 
 
+def pullback_weights(
+    weight: jnp.ndarray,
+    r: jnp.ndarray,
+    vpar: jnp.ndarray,
+    mu: jnp.ndarray,
+    r0: jnp.ndarray,
+    vpar0: jnp.ndarray,
+    mu0: jnp.ndarray,
+    B: jnp.ndarray,
+    B0_scalar: float,
+    n0_r: jnp.ndarray,
+    T_r: jnp.ndarray,
+    n0_r0: jnp.ndarray,
+    T_r0: jnp.ndarray,
+    mi: float,
+) -> jnp.ndarray:
+    """
+    Periodic pullback (f0 update) to prevent δf/f0 blow-up.
+
+    Adjusts weights so that f = f0_new * (1 - w_new) = f0_old * (1 - w_old).
+    w_new = 1 - (f0_old/f0_new) * (1 - w_old)
+    """
+    f0_new = maxwellian_f0(vpar, mu, B, n0_r, T_r, mi)
+    f0_old = maxwellian_f0(vpar0, mu0, jnp.full_like(mu0, B0_scalar), n0_r0, T_r0, mi)
+    ratio = f0_old / (f0_new + 1e-30)
+    ratio = jnp.clip(ratio, 0.01, 100.0)   # prevent extreme corrections
+    w_new = 1.0 - ratio * (1.0 - weight)
+    return w_new.astype(weight.dtype)
+
+
+def soft_weight_damp(weight: jnp.ndarray, nu_w: float, w_sat: float = 2.0, alpha: int = 2) -> jnp.ndarray:
+    """
+    Amplitude-dependent weight damping: damps large weights strongly, leaves small weights alone.
+    correction = -nu_w * w * (|w|/w_sat)^alpha
+    """
+    return weight - nu_w * weight * (jnp.abs(weight) / w_sat) ** alpha
+
+
 def init_canonical_weights(
     state: GCState,
     geom,

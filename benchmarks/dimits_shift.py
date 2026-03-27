@@ -38,6 +38,13 @@ COMMON = dict(
     pert_amp=1e-4,
     single_mode=False,
     k_alpha_min=2,   # suppress k=1 alpha mode to prevent aliasing blowup
+    # δf noise control improvements
+    canonical_loading=True,
+    use_pullback=True,
+    pullback_interval=50,
+    nu_soft=0.01,
+    w_sat=2.0,
+    soft_damp_alpha=2,
 )
 
 BLOWUP_THRESHOLD = 1e4

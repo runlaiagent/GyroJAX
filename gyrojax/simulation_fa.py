@@ -32,7 +32,7 @@ from gyrojax.geometry.field_aligned import (
 )
 from gyrojax.particles.guiding_center import GCState, init_maxwellian_particles
 from gyrojax.particles.guiding_center_fa import push_particles_fa
-from gyrojax.deltaf.weights import update_weights
+from gyrojax.deltaf.weights import update_weights, pullback_weights, soft_weight_damp
 from gyrojax.fields.poisson_fa import solve_poisson_fa, compute_efield_fa, filter_single_mode
 from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa, gather_from_grid_fa
 from gyrojax.geometry.profiles import build_cbc_profiles, interp_profiles, krook_damping
@@ -81,6 +81,13 @@ class SimConfigFA:
     k_mode: int = 1                 # binormal mode number n for ITG seed: sin(2θ + n·α)
     single_mode: bool = False       # if True, project phi to ±k_mode after each Poisson solve (linear benchmark mode)
     k_alpha_min: int = 0            # if > 0, zero out alpha modes 1..k_alpha_min-1 (suppress aliasing for nonlinear runs)
+    # δf noise control
+    canonical_loading:  bool  = False   # apply canonical Pφ weight correction at t=0
+    use_pullback:       bool  = False   # periodic f0 pullback transformation
+    pullback_interval:  int   = 50      # steps between pullbacks (0 = disabled)
+    nu_soft:            float = 0.0     # soft amplitude-dependent weight damping rate (0=off)
+    w_sat:              float = 2.0     # saturation weight for soft damp
+    soft_damp_alpha:    int   = 2       # power for soft damp
     # Collision model
     collision_model: str = 'none'   # 'none' | 'krook' | 'lorentz' | 'dougherty'
     nu_krook:  float = 0.01         # Krook damping rate
@@ -172,6 +179,11 @@ def _run_with_geom(
         weight=jnp.zeros(cfg.N_particles, dtype=jnp.float32),
     )
 
+    # Store initial (canonical) positions for pullback
+    r0_init    = psi_p.astype(jnp.float32)
+    vpar0_init = state_sa.vpar.astype(jnp.float32)
+    mu0_init   = state_sa.mu.astype(jnp.float32)
+
     # Seed perturbation
     if cfg.zonal_init:
         # Zonal flow: depends only on r (ψ), uniform in θ and α — for R-H / GAM tests
@@ -215,6 +227,23 @@ def _run_with_geom(
         phase   = n * alpha_p
         pert    = cfg.pert_amp * balloon * radial * jnp.sin(phase)
     state = state._replace(weight=pert)
+
+    # --- Improvement 1: Canonical Maxwellian loading ---
+    # Correct initial weights for the mismatch between guiding-center radius r
+    # and canonical toroidal momentum Pφ ~ -r + (vpar*q/Ω) correction.
+    if cfg.canonical_loading:
+        q_at_r0 = _interp_q(state.r, geom)
+        q_over_m_val = cfg.e / cfg.mi
+        Omega_i = q_over_m_val * cfg.B0
+        # Canonical radius: r_c = r - vpar * q(r) / Omega_i
+        delta_r = -state.vpar * q_at_r0 / Omega_i  # r_c - r
+        Ln_val = cfg.R0 / cfg.R0_over_Ln if cfg.R0_over_Ln != 0.0 else float('inf')
+        LT_val = cfg.R0 / cfg.R0_over_LT if cfg.R0_over_LT != 0.0 else float('inf')
+        H_val  = 0.5 * cfg.mi * state.vpar**2 + state.mu * cfg.B0
+        # w_canonical = delta_r * (1/Ln + H/(Ti) * 1/LT)
+        w_canonical = delta_r * (1.0 / Ln_val + H_val / (cfg.Ti * LT_val))
+        # Add to perturbation seed (both are O(small))
+        state = state._replace(weight=(state.weight + w_canonical).astype(jnp.float32))
 
     # Allow caller to override the initial state (e.g. for R-H zonal test)
     if state0_override is not None:
@@ -296,7 +325,7 @@ def _run_with_geom(
         _gs = (int(Npsi), int(Ntheta), int(Nalpha))
 
         def step_fn(carry, _):
-            state, phi, nan_flag, step_count = carry
+            state, phi, nan_flag, step_count, r0_c, vpar0_c, mu0_c = carry
 
             def do_step(args):
                 state, phi = args
@@ -363,13 +392,44 @@ def _run_with_geom(
                     q_over_m, cfg.mi, cfg.R0, cfg.dt,
                 )
 
+                # Improvement 3: Soft amplitude-dependent weight damping
+                if cfg.nu_soft > 0.0:
+                    new_w = soft_weight_damp(state.weight, cfg.nu_soft * cfg.dt, cfg.w_sat, cfg.soft_damp_alpha)
+                    state = state._replace(weight=new_w)
+
+                # Improvement 2: Pullback transformation every pullback_interval steps
+                do_pullback = (
+                    cfg.use_pullback and
+                    cfg.pullback_interval > 0
+                )
+                if do_pullback:
+                    n0_r0_p, T_r0_p = _get_profiles(r0_c, cfg)
+                    B_p_scalar = float(geom.B0)
+                    def _apply_pullback(_):
+                        w_pb = pullback_weights(
+                            state.weight, state.r, state.vpar, state.mu,
+                            r0_c, vpar0_c, mu0_c,
+                            B_p, B_p_scalar,
+                            n0_p, T_p, n0_r0_p, T_r0_p, cfg.mi,
+                        )
+                        return w_pb.astype(jnp.float32)
+                    def _skip_pullback(_):
+                        return state.weight.astype(jnp.float32)
+                    new_w_pb = jax.lax.cond(
+                        step_count % cfg.pullback_interval == 0,
+                        _apply_pullback, _skip_pullback, None,
+                    )
+                    state = state._replace(weight=new_w_pb)
+                    # Re-apply soft limiter after pullback
+                    state = state._replace(weight=10.0 * jnp.tanh(state.weight / 10.0))
+
                 # 7. diagnostics
-                phi_rms       = jnp.sqrt(jnp.mean(phi**2))
-                phi_max       = jnp.max(jnp.abs(phi))
-                w_rms         = jnp.sqrt(jnp.mean(state.weight**2))
+                phi_rms       = jnp.sqrt(jnp.mean(phi**2)).astype(jnp.float32)
+                phi_max       = jnp.max(jnp.abs(phi)).astype(jnp.float32)
+                w_rms         = jnp.sqrt(jnp.mean(state.weight**2)).astype(jnp.float32)
                 phi_zonal     = phi.mean(axis=(1, 2))
-                phi_zonal_rms = jnp.sqrt(jnp.mean(phi_zonal**2))
-                phi_zonal_mid = phi_zonal[phi_zonal.shape[0] // 2]
+                phi_zonal_rms = jnp.sqrt(jnp.mean(phi_zonal**2)).astype(jnp.float32)
+                phi_zonal_mid = phi_zonal[phi_zonal.shape[0] // 2].astype(jnp.float32)
 
                 diag = DiagnosticsFA(phi_rms=phi_rms, phi_max=phi_max, weight_rms=w_rms,
                                      phi_zonal_rms=phi_zonal_rms, phi_zonal_mid=phi_zonal_mid)
@@ -378,9 +438,11 @@ def _run_with_geom(
             def skip_step(args):
                 state, phi = args
                 empty_diag = DiagnosticsFA(
-                    phi_rms=jnp.array(0.0), phi_max=jnp.array(0.0),
-                    weight_rms=jnp.array(0.0),
-                    phi_zonal_rms=jnp.array(0.0), phi_zonal_mid=jnp.array(0.0),
+                    phi_rms=jnp.array(0.0, dtype=jnp.float32),
+                    phi_max=jnp.array(0.0, dtype=jnp.float32),
+                    weight_rms=jnp.array(0.0, dtype=jnp.float32),
+                    phi_zonal_rms=jnp.array(0.0, dtype=jnp.float32),
+                    phi_zonal_mid=jnp.array(0.0, dtype=jnp.float32),
                 )
                 return state, phi, empty_diag
 
@@ -402,14 +464,14 @@ def _run_with_geom(
             )
             new_step_count = step_count + 1
 
-            return (new_state, new_phi, new_nan, new_step_count), diag
+            return (new_state, new_phi, new_nan, new_step_count, r0_c, vpar0_c, mu0_c), diag
 
         if verbose:
             print(f"[GyroJAX FA scan] JIT-compiling {cfg.n_steps} steps...")
         init_nan = jnp.array(False)
         init_step = jnp.array(0)
-        (state, phi, _, _), diags_stacked = jax.lax.scan(
-            step_fn, (state, phi, init_nan, init_step), None, length=cfg.n_steps
+        (state, phi, _, _, _, _, _), diags_stacked = jax.lax.scan(
+            step_fn, (state, phi, init_nan, init_step, r0_init, vpar0_init, mu0_init), None, length=cfg.n_steps
         )
         jax.block_until_ready((state.r, phi, diags_stacked.phi_max))
         if verbose:
