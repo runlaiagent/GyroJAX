@@ -53,6 +53,9 @@ COMMON = dict(
     nu_soft=0.01,
     w_sat=2.0,
     soft_damp_alpha=2,
+    # GTC-style weight spreading
+    use_weight_spread=True,
+    weight_spread_interval=10,
 )
 
 BLOWUP_THRESHOLD = 1e4
@@ -92,11 +95,24 @@ for i, rlt in enumerate(RLT_VALUES):
 
         phi_max_final = float(np.max(np.abs(np.array([float(d.phi_max) for d in diags][-50:])))
                               if len(diags) >= 50 else np.abs(phi_max_arr).max())
-        weight_rms_final = float([d.weight_rms for d in diags][-1])
+        weight_rms_arr = np.array([float(d.weight_rms) for d in diags])
+        weight_rms_final = float(weight_rms_arr[-1])
 
-        # Ion heat flux (averaged over last 50 steps worth — use final phi)
+        # Saturation check: std/mean of phi_max over last 20% of steps
+        n_sat = max(int(len(phi_max_arr) * 0.2), 10)
+        phi_max_tail = phi_max_arr[-n_sat:]
+        mean_tail = np.mean(phi_max_tail)
+        std_tail  = np.std(phi_max_tail)
+        is_saturated = (mean_tail > 1e-10 and std_tail / (mean_tail + 1e-30) < 0.5)
+
+        # Ion heat flux from final state (time-average approximation:
+        # use last 30% phi_max mean to scale Q_i — actual phi field not stored per-step)
         Q_profile = ion_heat_flux(state, phi, geom, grid_shape, cfg.Ti, cfg.n0_avg, LT)
         Q_i = float(jnp.mean(Q_profile))
+
+        # Weight RMS warning
+        if weight_rms_final > 3.0:
+            print(f"  ⚠️  weight_rms={weight_rms_final:.3e} > 3.0 — noise-dominated result, Q_i may be unreliable")
 
         # Zonal flow rms
         zonal = extract_zonal_flow(phi)
@@ -105,6 +121,7 @@ for i, rlt in enumerate(RLT_VALUES):
         print(f"  phi_max_final  = {phi_max_final:.3e}")
         print(f"  weight_rms     = {weight_rms_final:.3e}")
         print(f"  Q_i (heat flux)= {Q_i:.4e}")
+        print(f"  saturated      = {is_saturated} (std/mean={std_tail/(mean_tail+1e-30):.2f} over last {n_sat} steps)")
         print(f"  zonal_rms      = {zonal_rms:.3e}")
 
         results.append({

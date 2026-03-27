@@ -354,3 +354,25 @@ def init_canonical_weights(
         r=state.r, theta=state.theta, zeta=state.zeta,
         vpar=state.vpar, mu=state.mu, weight=w0
     )
+
+
+def spread_weights(state, geom, grid_shape):
+    """
+    GTC-style weight spreading: scatter w to grid, gather back.
+    Smooths local weight variance while preserving total weight.
+    """
+    import jax.numpy as jnp
+    from gyrojax.interpolation.scatter_gather_fa import scatter_weights_raw_fa, gather_scalar_from_grid_fa
+
+    # Scatter weights to grid (raw, no normalization)
+    w_grid = scatter_weights_raw_fa(state, geom, grid_shape)
+
+    # Gather smoothed weights back to particles
+    w_smooth = gather_scalar_from_grid_fa(w_grid, state, geom)
+
+    # Preserve total weight (rescale)
+    scale = jnp.sum(jnp.abs(state.weight)) / (jnp.sum(jnp.abs(w_smooth)) + 1e-30)
+    w_new = w_smooth * scale
+
+    return state._replace(weight=w_new.astype(jnp.float32))
+

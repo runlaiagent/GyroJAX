@@ -32,7 +32,7 @@ from gyrojax.geometry.field_aligned import (
 )
 from gyrojax.particles.guiding_center import GCState, init_maxwellian_particles
 from gyrojax.particles.guiding_center_fa import push_particles_fa
-from gyrojax.deltaf.weights import update_weights, pullback_weights, soft_weight_damp
+from gyrojax.deltaf.weights import update_weights, pullback_weights, soft_weight_damp, spread_weights
 from gyrojax.fields.poisson_fa import solve_poisson_fa, compute_efield_fa, filter_single_mode
 from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa, gather_from_grid_fa
 from gyrojax.geometry.profiles import build_cbc_profiles, interp_profiles, krook_damping
@@ -93,6 +93,9 @@ class SimConfigFA:
     nu_krook:  float = 0.01         # Krook damping rate
     nu_ei:     float = 0.01         # e-i collision frequency (Lorentz)
     nu_coll:   float = 0.01         # Dougherty collision frequency
+    # GTC-style weight spreading
+    use_weight_spread: bool = False   # periodic weight smoothing onto grid
+    weight_spread_interval: int = 10  # spread every N steps
     # Electron model
     electron_model: str = 'adiabatic'   # 'adiabatic' | 'drift_kinetic'
     me_over_mi:     float = 1.0/1836.0
@@ -295,7 +298,8 @@ def _run_with_geom(
     # Supporting global_profiles inside lax.scan is a future enhancement.
     use_scan = (
         cfg.electron_model == 'adiabatic' and
-        cfg.collision_model == 'none'
+        cfg.collision_model == 'none' and
+        not cfg.use_weight_spread   # weight spreading needs Python for-loop
     )
 
     if use_scan:
@@ -581,11 +585,37 @@ def _run_with_geom(
         if cfg.use_global and global_profiles is not None:
             state = krook_damping(state, global_profiles, cfg.dt)
 
+        # Soft amplitude-dependent weight damping
+        if cfg.nu_soft > 0.0:
+            new_w = soft_weight_damp(state.weight, cfg.nu_soft * cfg.dt, cfg.w_sat, cfg.soft_damp_alpha)
+            state = state._replace(weight=new_w)
+
+        # Pullback transformation every pullback_interval steps
+        if cfg.use_pullback and cfg.pullback_interval > 0 and step % cfg.pullback_interval == 0:
+            n0_r0_p, T_r0_p = _get_profiles(r0_init, cfg)
+            B_p_scalar = float(geom.B0)
+            w_pb = pullback_weights(
+                state.weight, state.r, state.vpar, state.mu,
+                r0_init, vpar0_init, mu0_init,
+                B_p, B_p_scalar,
+                n0_p, T_p, n0_r0_p, T_r0_p, cfg.mi,
+            )
+            state = state._replace(weight=w_pb.astype(jnp.float32))
+            state = state._replace(weight=10.0 * jnp.tanh(state.weight / 10.0))
+
         # 6b. Collisions
         state, key = apply_collisions(state, B_p, cfg, cfg.dt, key)
 
         # Weight clamp (δf validity)
         state = state._replace(weight=jnp.clip(state.weight, -10.0, 10.0))
+
+        # Weight spreading (GTC technique): smooth weights onto grid every N steps
+        if cfg.use_weight_spread and cfg.weight_spread_interval > 0:
+            if step % cfg.weight_spread_interval == 0:
+                state_fa_ws = state._replace(zeta=state.zeta % (2 * jnp.pi))
+                state_spread = spread_weights(state_fa_ws, geom, grid_shape)
+                # Only update weights; keep original (unmodded) coordinates
+                state = state._replace(weight=state_spread.weight)
 
         # 6c. Electron push and weight update (drift-kinetic model only)
         if cfg.electron_model == 'drift_kinetic':

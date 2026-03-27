@@ -129,6 +129,76 @@ def scatter_to_grid_fa(
     return delta_n
 
 
+@functools.partial(jax.jit, static_argnums=(2,))
+def scatter_weights_raw_fa(
+    state,
+    geom: FieldAlignedGeometry,
+    grid_shape: tuple,
+) -> jnp.ndarray:
+    """
+    Scatter particle weights to grid WITHOUT normalization.
+    Used for weight spreading (GTC technique).
+    Returns raw accumulated weight grid of shape grid_shape.
+    """
+    Npsi, Ntheta, Nalpha = grid_shape
+    i0, i1, j0, j1, k0, k1, wp, wt, wa = _trilinear_weights_fa(
+        state.r, state.theta, state.zeta, geom, grid_shape
+    )
+    val  = state.weight.astype(jnp.float32)
+    size = Npsi * Ntheta * Nalpha
+    Nth_Nal = Ntheta * Nalpha
+
+    all_flat = jnp.concatenate([
+        i0 * Nth_Nal + j0 * Nalpha + k0,
+        i1 * Nth_Nal + j0 * Nalpha + k0,
+        i0 * Nth_Nal + j1 * Nalpha + k0,
+        i0 * Nth_Nal + j0 * Nalpha + k1,
+        i1 * Nth_Nal + j1 * Nalpha + k0,
+        i1 * Nth_Nal + j0 * Nalpha + k1,
+        i0 * Nth_Nal + j1 * Nalpha + k1,
+        i1 * Nth_Nal + j1 * Nalpha + k1,
+    ])
+    all_weights = jnp.concatenate([
+        val*(1-wp)*(1-wt)*(1-wa),
+        val*   wp *(1-wt)*(1-wa),
+        val*(1-wp)*   wt *(1-wa),
+        val*(1-wp)*(1-wt)*   wa,
+        val*   wp *   wt *(1-wa),
+        val*   wp *(1-wt)*   wa,
+        val*(1-wp)*   wt *   wa,
+        val*   wp *   wt *   wa,
+    ])
+    grid = jnp.zeros(size, dtype=jnp.float32).at[all_flat].add(all_weights)
+    return grid.reshape(grid_shape)
+
+
+@jax.jit
+def gather_scalar_from_grid_fa(
+    grid: jnp.ndarray,
+    state,
+    geom: FieldAlignedGeometry,
+) -> jnp.ndarray:
+    """
+    Gather scalar field from grid to particle positions (trilinear interpolation).
+    Used for weight spreading.
+    Returns scalar values at each particle position, shape (N,).
+    """
+    grid_shape = grid.shape
+    i0, i1, j0, j1, k0, k1, wp, wt, wa = _trilinear_weights_fa(
+        state.r, state.theta, state.zeta, geom, grid_shape
+    )
+    g = grid
+    val = (   (1-wp)*(1-wt)*(1-wa) * g[i0,j0,k0]
+            +    wp *(1-wt)*(1-wa) * g[i1,j0,k0]
+            + (1-wp)*   wt *(1-wa) * g[i0,j1,k0]
+            + (1-wp)*(1-wt)*   wa  * g[i0,j0,k1]
+            +    wp *   wt *(1-wa) * g[i1,j1,k0]
+            +    wp *(1-wt)*   wa  * g[i1,j0,k1]
+            + (1-wp)*   wt *   wa  * g[i0,j1,k1]
+            +    wp *   wt *   wa  * g[i1,j1,k1])
+    return val.astype(jnp.float32)
+
+
 @jax.jit
 def gather_from_grid_fa(
     phi: jnp.ndarray,
