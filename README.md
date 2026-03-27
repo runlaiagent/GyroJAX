@@ -86,11 +86,12 @@ This naturally captures nonlinear physics without the `⟨w²⟩ ≪ 1` constrai
 
 ### Benchmarks (full-f)
 
-| Benchmark | Status |
-|---|---|
-| CBC full-f growth rate | ✅ Implemented (`benchmarks/cbc_fullf.py`) |
-| Full-f nonlinear saturation | In development |
-| Dimits shift (full-f path) | Planned |
+| Benchmark | Result | Notes |
+|---|---|---|
+| CBC full-f linear growth rate | γ = 0.012 vti/R0 (positive ✅) | Low vs δf due to full-f noise floor (needs ~1/pert_amp² more particles for equal SNR) |
+| Full-f weight constancy | `std(W)/mean(W) < 1e-3` ✅ | Verified by test |
+| Full-f nonlinear saturation | Planned | Natural advantage over δf (no ⟨w²⟩ constraint) |
+| Dimits shift (full-f path) | Planned | |
 
 ---
 
@@ -145,11 +146,11 @@ gyrojax/
 - [x] VMEC stellarator geometry
 - [x] γ spectrum benchmark (ky·ρᵢ = 0.1–0.6)
 - [x] Multi-GPU sharding via `jax.sharding`
-- [x] Full-f simulation path
+- [x] Full-f simulation path (true Vlasov PIC, constant weights, systematic resampling)
+- [x] Full-f CBC benchmark (`benchmarks/cbc_fullf.py`)
 
 ### 🔄 In Progress
 - [ ] Dimits shift nonlinear benchmark (zonal flow suppression at R/LT < 6)
-- [ ] Full-f resampling (importance sampling / particle splitting)
 
 ### 📋 Planned
 - [ ] Electromagnetic perturbations (δA∥)
