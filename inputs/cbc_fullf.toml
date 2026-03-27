@@ -1,0 +1,65 @@
+# GyroJAX input file — Cyclone Base Case (full-f)
+# Full-f PIC benchmark using CBC parameters
+
+[run]
+description     = "CBC full-f benchmark"
+method          = "fullf"
+time_integrator = "explicit"
+
+[grid]
+Npsi   = 16
+Ntheta = 32
+Nalpha = 64
+
+[particles]
+N_particles = 200000
+loading     = "maxwellian"
+vpar_cap    = 4.0
+
+[time]
+dt      = 0.05
+n_steps = 200
+
+[geometry]
+type = "salpha"
+R0   = 1.0
+a    = 0.18
+B0   = 1.0
+q0   = 1.4
+q1   = 0.5
+
+[physics]
+Ti         = 1.0
+Te         = 1.0
+mi         = 1.0
+rho_star   = 0.005556
+R0_over_LT = 6.9
+R0_over_Ln = 2.2
+n0_avg     = 1.0
+vti        = 1.0
+
+[species]
+ions      = "gyrokinetic"
+electrons = "adiabatic"
+
+[domain]
+flux_tube = true
+
+[init]
+pert_amp    = 1.0e-4
+single_mode = true
+k_mode      = 18
+zonal_init  = false
+
+[numerics]
+collision_model   = "none"
+nu_krook          = 0.0
+k_alpha_min       = 0
+resample_interval = 50
+n_steps_warmup    = 0
+
+[output]
+diag_interval  = 1
+save_phi       = true
+save_particles = false
+output_dir     = "results/"

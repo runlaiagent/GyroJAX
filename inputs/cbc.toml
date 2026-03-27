@@ -1,0 +1,75 @@
+# GyroJAX input file — Cyclone Base Case (delta-f)
+# Linear ITG benchmark: matches Dimits et al. 2000 growth rate gamma ~ 0.17 vti/R0
+
+[run]
+description     = "CBC linear benchmark — ITG growth rate (delta-f)"
+method          = "deltaf"          # "deltaf" or "fullf"
+time_integrator = "explicit"        # "explicit" | "semi_implicit" | "implicit"
+
+[grid]
+Npsi   = 16
+Ntheta = 32
+Nalpha = 64
+
+[particles]
+N_particles = 300000
+loading     = "maxwellian"   # "maxwellian" | "canonical"
+vpar_cap    = 4.0
+
+[time]
+dt      = 0.05
+n_steps = 200
+
+[geometry]
+type = "salpha"   # "salpha" | "vmec"
+R0   = 1.0
+a    = 0.18
+B0   = 1.0
+q0   = 1.4
+q1   = 0.5
+
+[physics]
+Ti         = 1.0
+Te         = 1.0
+mi         = 1.0
+rho_star   = 0.005556    # rho_i/a = 1/180
+R0_over_LT = 6.9
+R0_over_Ln = 2.2
+n0_avg     = 1.0
+vti        = 1.0
+
+[species]
+ions      = "gyrokinetic"   # always gyrokinetic
+electrons = "adiabatic"     # "adiabatic" | "drift_kinetic"
+
+[domain]
+flux_tube = true   # false = global run
+
+[init]
+pert_amp    = 1.0e-4
+single_mode = true
+k_mode      = 18
+zonal_init  = false
+
+[numerics]
+# Collisions
+collision_model = "none"    # "none" | "krook" | "lorentz" | "dougherty"
+nu_krook        = 0.005
+# Noise control (delta-f only)
+use_weight_spread      = false
+weight_spread_interval = 10
+canonical_loading      = false
+use_pullback           = false
+pullback_interval      = 50
+nu_soft                = 0.0
+# Implicit solver (only used when time_integrator = "implicit")
+picard_max_iter = 4
+picard_tol      = 1.0e-3
+# Alpha mode filter
+k_alpha_min = 0
+
+[output]
+diag_interval  = 1       # save diagnostics every N steps
+save_phi       = true    # save final phi field
+save_particles = false   # save final particle state (large!)
+output_dir     = "results/"
