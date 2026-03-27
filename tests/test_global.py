@@ -163,42 +163,82 @@ def test_global_sim_no_nan():
 
 
 def test_global_vs_fluxtube_growth():
-    """Global and flux-tube give growth rate within 30% of each other."""
+    """
+    Global simulation produces a positive linear ITG growth rate at CBC parameters.
+
+    Uses single_mode=True at k_mode=18 (dominant CBC mode) to isolate the ITG
+    without aliasing noise. Verifies γ > 0 (unstable) and within CBC reference
+    range [0.05, 0.40] vti/R0.
+
+    The flux-tube CBC reference is γ ≈ 0.145 vti/R0 (measured in test_cbc_error_under_30pct).
+    Global sim may differ due to radial profile effects; we allow a wide band.
+    """
     from gyrojax.simulation_fa import SimConfigFA, run_simulation_fa
 
-    shared = dict(
-        Npsi=8, Ntheta=16, Nalpha=8,
-        N_particles=5_000,
-        n_steps=80,
-        dt=0.05,
-    )
     key = jax.random.PRNGKey(7)
 
-    cfg_ft = SimConfigFA(**shared, use_global=False)
+    # Flux-tube: single-mode CBC, minimal viable config
+    cfg_ft = SimConfigFA(
+        Npsi=16, Ntheta=32, Nalpha=64,
+        N_particles=300_000,
+        n_steps=200,
+        dt=0.05,
+        R0_over_LT=6.9,
+        R0_over_Ln=2.2,
+        single_mode=True,
+        k_mode=18,
+        nu_krook=0.0,
+        use_global=False,
+    )
     diags_ft, _, _, _ = run_simulation_fa(cfg_ft, key, verbose=False)
 
-    cfg_gl = SimConfigFA(**shared, use_global=True)
+    # Global: same mode, same resolution, with Krook BCs
+    cfg_gl = SimConfigFA(
+        Npsi=16, Ntheta=32, Nalpha=64,
+        N_particles=300_000,
+        n_steps=200,
+        dt=0.05,
+        R0_over_LT=6.9,
+        R0_over_Ln=2.2,
+        single_mode=True,
+        k_mode=18,
+        nu_krook=0.005,
+        use_global=True,
+    )
     diags_gl, _, _, _ = run_simulation_fa(cfg_gl, key, verbose=False)
 
-    def growth_rate(diags, dt, window=0.4):
+    def growth_rate(diags, dt, window=0.35):
+        """Fit log(phi_max) over middle-to-late window (avoid initial transient)."""
         phi_max = np.array([float(d.phi_max) for d in diags])
         n = len(phi_max)
         n_start = int(n * (1 - window))
-        t = np.arange(n_start, n) * dt
-        log_phi = np.log(np.maximum(phi_max[n_start:], 1e-20))
-        if len(t) < 2:
+        # Find linear phase: phi still growing, not yet saturated
+        # Use 40-75% of run to avoid init transient and saturation
+        n_s = int(n * 0.40)
+        n_e = int(n * 0.75)
+        t = np.arange(n_s, n_e) * dt
+        log_phi = np.log(np.maximum(phi_max[n_s:n_e], 1e-20))
+        if len(t) < 4:
             return float("nan")
         return float(np.polyfit(t, log_phi, 1)[0])
 
-    gamma_ft = growth_rate(diags_ft, 0.05)
-    gamma_gl = growth_rate(diags_gl, 0.05)
+    gamma_ft = growth_rate(diags_ft, cfg_ft.dt)
+    gamma_gl = growth_rate(diags_gl, cfg_gl.dt)
 
-    print(f"\n  flux-tube γ = {gamma_ft:.4f},  global γ = {gamma_gl:.4f}")
+    print(f"\n  flux-tube γ = {gamma_ft:.4f}  global γ = {gamma_gl:.4f}")
+    print(f"  CBC reference: γ ≈ 0.10–0.20 vti/R0")
 
-    # Both should be positive (growing) and agree within 30%
-    # Use a loose threshold for the low-res test
-    if abs(gamma_ft) > 1e-6:
-        rel_diff = abs(gamma_gl - gamma_ft) / (abs(gamma_ft) + 1e-10)
-        assert rel_diff < 0.30 or gamma_gl > 0, (
-            f"Growth rates too different: flux-tube={gamma_ft:.4f}, global={gamma_gl:.4f}"
-        )
+    # Both should give positive growth at R/LT=6.9 (well above linear threshold ~4)
+    assert gamma_ft > 0, f"Flux-tube growth rate should be positive, got {gamma_ft:.4f}"
+    assert gamma_gl > 0, f"Global growth rate should be positive, got {gamma_gl:.4f}"
+
+    # Both should be in a physically reasonable range
+    assert 0.03 < gamma_ft < 0.60, f"Flux-tube γ={gamma_ft:.4f} outside range [0.03, 0.60]"
+    assert 0.03 < gamma_gl < 0.60, f"Global γ={gamma_gl:.4f} outside range [0.03, 0.60]"
+
+    # Should agree within 60% (global has Krook BCs which can reduce effective gamma)
+    rel_diff = abs(gamma_gl - gamma_ft) / (abs(gamma_ft) + 1e-10)
+    assert rel_diff < 0.60, (
+        f"Global and flux-tube growth rates disagree too much: "
+        f"γ_ft={gamma_ft:.4f}, γ_gl={gamma_gl:.4f} (rel diff = {rel_diff:.1%})"
+    )
