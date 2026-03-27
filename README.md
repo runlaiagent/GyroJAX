@@ -95,95 +95,220 @@ This naturally captures nonlinear physics without the `⟨w²⟩ ≪ 1` constrai
 
 ---
 
-## Architecture
-
-```
-gyrojax/
-├── geometry/
-│   ├── salpha.py          # s-α field-aligned geometry
-│   ├── vmec.py            # VMEC stellarator geometry
-│   └── profiles.py        # radial profiles, Krook BCs
-├── particles/
-│   └── guiding_center.py  # GCState pytree + RK4 pusher
-├── fields/
-│   └── poisson.py         # GK Poisson solver (FFT + tridiagonal)
-├── deltaf/
-│   └── weights.py         # δf weight evolution (RK4, CN, semi-implicit)
-├── fullf/
-│   └── __init__.py        # Full-f marker weights + resampling
-├── electrons/
-│   └── __init__.py        # Adiabatic / drift-kinetic / GK electrons
-├── collisions/
-│   └── operators.py       # Krook, Lorentz, Dougherty collision operators
-├── interpolation/
-│   └── scatter_gather_fa.py  # Gyroaveraged scatter/gather (field-aligned)
-├── diagnostics/
-│   └── __init__.py        # Growth rate fitting, ky·ρᵢ estimation
-├── simulation_fa.py        # δf field-aligned main loop (lax.scan)
-├── simulation_fullf.py     # Full-f main loop
-├── simulation_sharded.py   # Multi-GPU sharded δf loop
-└── sharding.py             # JAX device sharding utilities
-```
-
----
-
-## Roadmap
-
-### ✅ Done
-- [x] Field-aligned s-α geometry with q(r) profile
-- [x] δf GC pusher + RK4 weight advance
-- [x] GK Poisson solver (FFT/tridiagonal, gyroaveraging)
-- [x] CBC linear benchmark — γ = 0.172 (1.9% error vs GENE)
-- [x] Rosenbluth-Hinton zonal flow test
-- [x] Semi-implicit CN weight update (unconditionally bounded)
-- [x] Implicit CN+Picard via `lax.while_loop`
-- [x] Canonical Maxwellian loading
-- [x] Pullback transformation
-- [x] GTC-style weight spreading
-- [x] Global radial profiles + Krook buffer BCs
-- [x] Kinetic electrons (drift-kinetic, subcycling)
-- [x] Collision operators (Krook, Lorentz, Dougherty)
-- [x] VMEC stellarator geometry
-- [x] γ spectrum benchmark (ky·ρᵢ = 0.1–0.6)
-- [x] Multi-GPU sharding via `jax.sharding`
-- [x] Full-f simulation path (true Vlasov PIC, constant weights, systematic resampling)
-- [x] Full-f CBC benchmark (`benchmarks/cbc_fullf.py`)
-
-### 🔄 In Progress
-- [ ] Dimits shift nonlinear benchmark (zonal flow suppression at R/LT < 6)
-
-### 📋 Planned
-- [ ] Electromagnetic perturbations (δA∥)
-- [ ] Nonlinear CBC heat flux benchmark (χᵢ vs R/LT)
-- [ ] Stellarator ITG scan (VMEC geometry)
-- [ ] Gyrokinetic electrons (full GK, not drift-kinetic)
-- [ ] Adaptive timestepping
-
----
-
 ## Quick Start
 
 ```bash
 conda activate jax_wlhx
 pip install -e .
 
-# Run tests (147 tests)
-pytest tests/ -v
+# Run from an input file (recommended)
+python -m gyrojax.runner inputs/cbc.toml --verbose
+python -m gyrojax.runner inputs/cbc.toml --dry-run     # print config, no run
+python -m gyrojax.runner inputs/cbc.toml --n-steps 20  # quick override
 
-# CBC linear growth rate benchmark
+# Or run benchmarks directly
 python benchmarks/cyclone_base_case_fa.py
-
-# γ(ky·ρᵢ) spectrum
 python benchmarks/gamma_spectrum.py --quick
-
-# Dimits shift scan
 python benchmarks/dimits_shift.py
-
-# Full-f CBC
 python benchmarks/cbc_fullf.py
+
+# Run all tests
+pytest tests/ -v
 ```
 
 ---
+
+## Input Files
+
+GyroJAX uses TOML input files — no Python required. Drop a `.toml` in `inputs/` and run it.
+
+```toml
+# inputs/cbc.toml — Cyclone Base Case
+
+[run]
+method          = "deltaf"       # "deltaf" | "fullf"
+time_integrator = "explicit"     # "explicit" | "semi_implicit" | "implicit"
+
+[grid]
+Npsi = 16 ;  Ntheta = 32 ;  Nalpha = 64
+
+[particles]
+N_particles = 300000
+loading     = "maxwellian"       # "maxwellian" | "canonical"
+
+[time]
+dt = 0.05 ;  n_steps = 200
+
+[geometry]
+R0 = 1.0 ;  a = 0.18 ;  B0 = 1.0 ;  q0 = 1.4 ;  q1 = 0.5
+
+[physics]
+rho_star = 0.005556   # 1/180 — sets e = 1/rho_star = 180... × (vti·mi/a·B0)
+R0_over_LT = 6.9 ;  R0_over_Ln = 2.2
+
+[species]
+electrons = "adiabatic"          # "adiabatic" | "drift_kinetic"
+
+[init]
+pert_amp = 1.0e-4 ;  single_mode = true ;  k_mode = 18
+
+[numerics]
+collision_model = "none"         # "none" | "krook" | "lorentz" | "dougherty"
+
+[output]
+output_dir = "results/"
+```
+
+Bundled input files:
+
+| File | Physics |
+|---|---|
+| `inputs/cbc.toml` | CBC δf linear growth rate |
+| `inputs/cbc_fullf.toml` | CBC full-f (constant weights) |
+| `inputs/rosenbluth_hinton.toml` | Zonal flow residual (R-H test) |
+| `inputs/dimits.toml` | Dimits shift nonlinear scan template |
+
+---
+
+## File Structure
+
+```
+GyroJAX/
+│
+├── inputs/                        # TOML input files (start here)
+│   ├── cbc.toml                   # Cyclone Base Case δf
+│   ├── cbc_fullf.toml             # Cyclone Base Case full-f
+│   ├── rosenbluth_hinton.toml     # Zonal flow residual test
+│   └── dimits.toml                # Dimits shift scan template
+│
+├── gyrojax/                       # Core library
+│   ├── input.py                   # TOML → SimConfig parser
+│   ├── runner.py                  # CLI: python -m gyrojax.runner input.toml
+│   │
+│   ├── simulation_fa.py           # δf main loop (field-aligned, lax.scan)
+│   ├── simulation_fullf.py        # Full-f main loop (dW/dt=0)
+│   ├── simulation_sharded.py      # Multi-GPU sharded δf loop
+│   │
+│   ├── geometry/
+│   │   ├── salpha.py              # s-α magnetic geometry (CBC default)
+│   │   ├── field_aligned.py       # Field-aligned coordinate transforms
+│   │   ├── vmec_geometry.py       # VMEC stellarator geometry reader
+│   │   └── profiles.py            # Radial profiles, Krook buffer BCs
+│   │
+│   ├── particles/
+│   │   ├── guiding_center.py      # GCState pytree + RK4 pusher
+│   │   └── guiding_center_fa.py   # Field-aligned GC pusher (push_particles_fa)
+│   │
+│   ├── fields/
+│   │   ├── poisson.py             # GK Poisson solver (flux-tube)
+│   │   └── poisson_fa.py          # GK Poisson (field-aligned, gyroavg)
+│   │
+│   ├── deltaf/
+│   │   └── weights.py             # δf weight eq: RK4, semi-implicit CN, Picard
+│   │
+│   ├── fullf/
+│   │   └── __init__.py            # Full-f: constant weights, systematic resampling
+│   │
+│   ├── electrons/
+│   │   └── __init__.py            # Adiabatic / drift-kinetic / GK electrons
+│   │
+│   ├── collisions/
+│   │   └── operators.py           # Krook, Lorentz pitch-angle, Dougherty
+│   │
+│   ├── interpolation/
+│   │   ├── scatter_gather.py      # Particle ↔ grid (flux-tube)
+│   │   └── scatter_gather_fa.py   # Gyroaveraged scatter/gather (field-aligned)
+│   │
+│   ├── diagnostics/
+│   │   └── __init__.py            # Growth rate fitting, ky·ρᵢ estimation
+│   │
+│   ├── viz/                       # Plotting utilities
+│   ├── sharding.py                # JAX multi-device sharding
+│   ├── normalization.py           # Gyrokinetic normalisation conventions
+│   └── utils.py                   # Shared helpers
+│
+├── benchmarks/                    # Physics validation scripts
+│   ├── cyclone_base_case_fa.py    # CBC δf: γ = 0.172 vti/R0 (1.9% error)
+│   ├── cbc_benchmark.py           # CBC with phi_rms fitting
+│   ├── cbc_fullf.py               # CBC full-f
+│   ├── gamma_spectrum.py          # γ(ky·ρᵢ) spectrum sweep
+│   ├── dimits_shift.py            # Nonlinear R/LT scan → Dimits threshold
+│   ├── rosenbluth_hinton.py       # Zonal flow residual
+│   ├── collision_scan.py          # Collision rate scan
+│   ├── kinetic_electron_cbc.py    # Kinetic electron CBC
+│   ├── global_cbc.py              # Global (full-radius) CBC
+│   ├── stellarator_itg.py         # Stellarator ITG (VMEC)
+│   └── results/                   # Saved benchmark output (JSON)
+│
+└── tests/                         # pytest suite (158 tests)
+    ├── test_simulation_fa.py      # δf simulation integration tests
+    ├── test_phase3_fullf.py       # Full-f: weight constancy, density deposit
+    ├── test_input.py              # TOML parser + CLI runner
+    ├── test_rosenbluth_hinton.py  # Zonal flow physics
+    ├── test_phase2a/b.py          # Field-aligned geometry + pusher
+    ├── test_geometry.py           # s-α, VMEC, profiles
+    ├── test_poisson.py            # GK Poisson solver
+    ├── test_pusher.py             # GC equations of motion
+    ├── test_collisions.py         # Collision operators
+    ├── test_kinetic_electrons.py  # Electron physics
+    ├── test_global.py             # Global geometry
+    ├── test_sharding.py           # Multi-GPU
+    └── test_production_validation.py  # Physics regression tests
+```
+
+---
+
+## Architecture
+
+---
+
+## Roadmap
+
+### Phase 1 — Foundation ✅
+- [x] Field-aligned s-α geometry with q(r) profile
+- [x] δf GC pusher + RK4 weight advance
+- [x] GK Poisson solver (FFT/tridiagonal, gyroaveraging)
+- [x] CBC linear benchmark — γ = 0.172 vti/R0 (1.9% error vs GENE/GX)
+- [x] Rosenbluth-Hinton zonal flow test
+
+### Phase 2 — Production δf ✅
+- [x] Semi-implicit CN weight update (unconditionally bounded, prevents blowup)
+- [x] Implicit CN+Picard via `jax.lax.while_loop` (2–4 iter/step, 5–10× larger dt)
+- [x] Canonical Maxwellian loading (reduced sampling noise)
+- [x] Pullback transformation (long-time weight control)
+- [x] GTC-style weight spreading (grid-smoothed noise suppression)
+- [x] Global radial profiles + Krook buffer BCs
+- [x] Kinetic electrons (drift-kinetic, subcycling)
+- [x] Collision operators (Krook, Lorentz, Dougherty)
+- [x] VMEC stellarator geometry
+- [x] Multi-GPU sharding via `jax.sharding`
+
+### Phase 3 — Full-f ✅
+- [x] True Vlasov PIC (dW/dt = 0, constant marker weights)
+- [x] Full δn deposit for Poisson (not just perturbation)
+- [x] Systematic resampling (CDF-based, uniform offset)
+- [x] Full-f CBC benchmark (`benchmarks/cbc_fullf.py`)
+- [x] Weight constancy verified: `std(W)/mean(W) < 1e-3` ✅
+
+### Phase 4 — Usability ✅
+- [x] TOML input files — GX-style, no Python required
+- [x] CLI runner: `python -m gyrojax.runner input.toml`
+- [x] δf/full-f switch, explicit/semi-implicit/implicit switch in input file
+- [x] γ spectrum benchmark (ky·ρᵢ = 0.1–0.6)
+- [x] 158 tests passing
+
+### 🔄 In Progress
+- [ ] Dimits shift nonlinear benchmark (zonal flow suppression at R/LT < 6)
+- [ ] Full-f noise floor study (γ convergence with N_particles)
+
+### 📋 Next
+- [ ] Electromagnetic perturbations (δA∥ — Ampere's law coupling)
+- [ ] Nonlinear heat flux benchmark (χᵢ vs R/LT)
+- [ ] Dimits shift full-f (natural advantage: no ⟨w²⟩ constraint)
+- [ ] Stellarator ITG scan (VMEC geometry)
+- [ ] Gyrokinetic electrons (full GK, not drift-kinetic)
+- [ ] Adaptive timestepping
+- [ ] Input file: VMEC geometry path support
 
 ## CBC Parameters (Cyclone Base Case)
 
