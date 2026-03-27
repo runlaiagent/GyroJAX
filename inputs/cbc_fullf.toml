@@ -46,7 +46,7 @@ electrons = "adiabatic"
 flux_tube = true
 
 [init]
-pert_amp    = 1.0e-4
+pert_amp    = 1.0e-2
 single_mode = true
 k_mode      = 18
 zonal_init  = false

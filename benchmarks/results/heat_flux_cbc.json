@@ -1,0 +1,43 @@
+{
+  "description": "Nonlinear CBC heat flux scan: chi_i vs R/LT",
+  "parameters": {
+    "N_particles": 20000,
+    "n_steps": 80,
+    "dt": 0.05,
+    "R0": 1.0,
+    "a": 0.18,
+    "q0": 1.4,
+    "q1": 0.5,
+    "R0_over_Ln": 2.2
+  },
+  "results": [
+    {
+      "R0_over_LT": 4.0,
+      "Q_i_avg": 802980.813615988,
+      "chi_i_avg": 200745.203403997,
+      "elapsed_s": 13.644058227539062
+    },
+    {
+      "R0_over_LT": 6.0,
+      "Q_i_avg": 3007369.1398198097,
+      "chi_i_avg": 501228.1899699683,
+      "elapsed_s": 1.287926197052002
+    },
+    {
+      "R0_over_LT": 7.0,
+      "Q_i_avg": 4158385.4315492124,
+      "chi_i_avg": 594055.0616498875,
+      "elapsed_s": 6.726660490036011
+    },
+    {
+      "R0_over_LT": 9.0,
+      "Q_i_avg": 4743051.7521588635,
+      "chi_i_avg": 527005.7502398738,
+      "elapsed_s": 1.2239406108856201
+    }
+  ],
+  "expected": {
+    "Dimits_shift": "chi_i ~ 0 for R/LT < 6",
+    "anomalous_transport": "chi_i > 0 for R/LT > 6.5"
+  }
+}

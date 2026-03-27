@@ -106,6 +106,8 @@ class SimConfigFA:
     picard_max_iter: int   = 4       # max Picard iterations
     picard_tol:      float = 1e-3    # convergence tolerance on φ (L∞ norm)
     semi_implicit_weights: bool = False  # semi-implicit CN weight update (no Picard, replaces RK4)
+    # Electromagnetic — Phase 5
+    beta: float = 0.0   # plasma beta — 0.0 = electrostatic (default), >0 = electromagnetic
 
 
 class DiagnosticsFA(NamedTuple):
@@ -445,12 +447,10 @@ def _run_with_geom(
         _gs = (int(Npsi), int(Ntheta), int(Nalpha))
 
         def step_fn(carry, _):
-            state, phi, nan_flag, step_count, r0_c, vpar0_c, mu0_c = carry
+            state, phi, nan_flag, step_count, r0_c, vpar0_c, mu0_c, A_par_prev = carry
 
             def do_step(args):
-                state, phi = args
-
-                # Interpolate geometry ONCE at current positions
+                state, phi, A_par_prev = args
                 B_p, gBpsi_p, gBth_p, kpsi_p, kth_p, g_aa_p = interp_fa_to_particles(
                     geom, state.r, state.theta, state.zeta
                 )
@@ -480,9 +480,30 @@ def _run_with_geom(
                 if cfg.single_mode:
                     phi = filter_single_mode(phi, cfg.k_mode)
 
+                # 2b. Electromagnetic: solve Ampere's law for δA∥ (Phase 5)
+                # If beta > 0: scatter j∥, solve ∇²⊥ A∥ = -β·j∥
+                # The inductive E∥ contribution (∂A∥/∂t) is added to E_theta below
+                if cfg.beta > 0.0:
+                    from gyrojax.fields.ampere_fa import scatter_jpar_to_grid, solve_ampere_fa
+                    from gyrojax.fields.poisson_fa import compute_efield_fa
+                    jpar_grid = scatter_jpar_to_grid(state_fa, geom, _gs) * cfg.n0_avg
+                    A_par = solve_ampere_fa(jpar_grid, geom, cfg.beta)
+                else:
+                    A_par = None
+
                 # 3. gather E — mod 2π on α for grid lookup
                 state_gather = state._replace(zeta=state.zeta % (2 * jnp.pi))
                 E_psi_p, E_theta_p, E_alpha_p = gather_from_grid_fa(phi, state_gather, geom)
+
+                # 3b. EM correction: add ∂A∥/∂t to E_theta (inductive E∥)
+                # E∥_eff = -∇∥φ - ∂A∥/∂t  ≈  E_theta - (A_par - A_par_prev)/dt
+                if cfg.beta > 0.0:
+                    dA_dt_grid = (A_par - A_par_prev) / cfg.dt
+                    dA_dt_p, _, _ = gather_from_grid_fa(dA_dt_grid, state_gather, geom)
+                    E_theta_p = E_theta_p - dA_dt_p
+                    new_A_par = A_par
+                else:
+                    new_A_par = A_par_prev
 
                 # 4. push — using geometry at current (pre-push) positions
                 state = push_particles_fa(
@@ -553,10 +574,10 @@ def _run_with_geom(
 
                 diag = DiagnosticsFA(phi_rms=phi_rms, phi_max=phi_max, weight_rms=w_rms,
                                      phi_zonal_rms=phi_zonal_rms, phi_zonal_mid=phi_zonal_mid)
-                return state, phi, diag
+                return state, phi, new_A_par, diag
 
             def skip_step(args):
-                state, phi = args
+                state, phi, A_par_prev = args
                 empty_diag = DiagnosticsFA(
                     phi_rms=jnp.array(0.0, dtype=jnp.float32),
                     phi_max=jnp.array(0.0, dtype=jnp.float32),
@@ -564,9 +585,9 @@ def _run_with_geom(
                     phi_zonal_rms=jnp.array(0.0, dtype=jnp.float32),
                     phi_zonal_mid=jnp.array(0.0, dtype=jnp.float32),
                 )
-                return state, phi, empty_diag
+                return state, phi, A_par_prev, empty_diag
 
-            new_state, new_phi, diag = jax.lax.cond(nan_flag, skip_step, do_step, (state, phi))
+            new_state, new_phi, new_A_par, diag = jax.lax.cond(nan_flag, skip_step, do_step, (state, phi, A_par_prev))
             new_nan = nan_flag | jnp.any(jnp.isnan(new_phi)) | jnp.any(jnp.isinf(new_phi))
 
             # Verbose progress every 50 steps via jax.debug.print (host callback)
@@ -584,14 +605,15 @@ def _run_with_geom(
             )
             new_step_count = step_count + 1
 
-            return (new_state, new_phi, new_nan, new_step_count, r0_c, vpar0_c, mu0_c), diag
+            return (new_state, new_phi, new_nan, new_step_count, r0_c, vpar0_c, mu0_c, new_A_par), diag
 
         if verbose:
             print(f"[GyroJAX FA scan] JIT-compiling {cfg.n_steps} steps...")
         init_nan = jnp.array(False)
         init_step = jnp.array(0)
-        (state, phi, _, _, _, _, _), diags_stacked = jax.lax.scan(
-            step_fn, (state, phi, init_nan, init_step, r0_init, vpar0_init, mu0_init), None, length=cfg.n_steps
+        init_A_par = jnp.zeros(_gs, dtype=jnp.float32)
+        (state, phi, _, _, _, _, _, _), diags_stacked = jax.lax.scan(
+            step_fn, (state, phi, init_nan, init_step, r0_init, vpar0_init, mu0_init, init_A_par), None, length=cfg.n_steps
         )
         jax.block_until_ready((state.r, phi, diags_stacked.phi_max))
         if verbose:
@@ -641,9 +663,26 @@ def _run_with_geom(
         if cfg.single_mode:
             phi = filter_single_mode(phi, cfg.k_mode)
 
+        # 2b. EM: solve Ampere's law for δA∥ (Phase 5)
+        if cfg.beta > 0.0:
+            from gyrojax.fields.ampere_fa import scatter_jpar_to_grid, solve_ampere_fa
+            jpar_grid = scatter_jpar_to_grid(state_fa, geom, grid_shape) * cfg.n0_avg
+            A_par_new = solve_ampere_fa(jpar_grid, geom, cfg.beta)
+            if step == 0:
+                A_par_prev = jnp.zeros_like(A_par_new)
+            dA_dt_grid = (A_par_new - A_par_prev) / cfg.dt
+            A_par_prev = A_par_new
+        else:
+            dA_dt_grid = None
+
         # 3. Gather E to particle positions (mod 2π on α for grid lookup)
         state_gather = state._replace(zeta=state.zeta % (2 * jnp.pi))
         E_psi_p, E_theta_p, E_alpha_p = gather_from_grid_fa(phi, state_gather, geom)
+
+        # 3b. EM correction: add ∂A∥/∂t contribution to E_theta (inductive E∥)
+        if cfg.beta > 0.0 and dA_dt_grid is not None:
+            dA_dt_p, _, _ = gather_from_grid_fa(dA_dt_grid, state_gather, geom)
+            E_theta_p = E_theta_p - dA_dt_p
 
         # Pre-interpolate geometry at current positions
         B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p, g_aa_p = interp_fa_to_particles(
