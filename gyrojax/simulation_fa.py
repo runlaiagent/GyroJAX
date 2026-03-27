@@ -80,6 +80,7 @@ class SimConfigFA:
     zonal_init: bool = False        # if True, seed zonal flow (k_theta=0) for R-H/GAM tests
     k_mode: int = 1                 # binormal mode number n for ITG seed: sin(2θ + n·α)
     single_mode: bool = False       # if True, project phi to ±k_mode after each Poisson solve (linear benchmark mode)
+    k_alpha_min: int = 0            # if > 0, zero out alpha modes 1..k_alpha_min-1 (suppress aliasing for nonlinear runs)
     # Collision model
     collision_model: str = 'none'   # 'none' | 'krook' | 'lorentz' | 'dougherty'
     nu_krook:  float = 0.01         # Krook damping rate
@@ -318,6 +319,14 @@ def _run_with_geom(
 
                 # 2. solve poisson
                 phi = solve_poisson_fa(delta_n, geom, cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e)
+                # Optional: suppress low-k alpha modes to prevent aliasing blowup
+                if cfg.k_alpha_min > 0:
+                    phi_hat = jnp.fft.fft(phi, axis=-1)
+                    Nal = phi.shape[-1]
+                    for _k in range(1, cfg.k_alpha_min):
+                        phi_hat = phi_hat.at[:, :, _k].set(0+0j)
+                        phi_hat = phi_hat.at[:, :, Nal - _k].set(0+0j)
+                    phi = jnp.fft.ifft(phi_hat, axis=-1).real
                 # Optional: project to single mode for linear benchmark
                 if cfg.single_mode:
                     phi = filter_single_mode(phi, cfg.k_mode)
@@ -439,6 +448,14 @@ def _run_with_geom(
                 delta_n, geom,
                 cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e
             )
+        # Suppress low-k alpha modes to prevent aliasing blowup
+        if cfg.k_alpha_min > 0:
+            phi_hat = jnp.fft.fft(phi, axis=-1)
+            Nal = phi.shape[-1]
+            for _k in range(1, cfg.k_alpha_min):
+                phi_hat = phi_hat.at[:, :, _k].set(0+0j)
+                phi_hat = phi_hat.at[:, :, Nal - _k].set(0+0j)
+            phi = jnp.fft.ifft(phi_hat, axis=-1).real
         if cfg.single_mode:
             phi = filter_single_mode(phi, cfg.k_mode)
 
