@@ -87,8 +87,11 @@ def run_cbc_fa(quick: bool = False):
     phi_rms_series = np.array([float(d.phi_rms) for d in diags])
     t_series = np.arange(len(diags)) * cfg.dt
 
-    # Smart growth rate extraction
-    gamma, step_start, step_end = extract_growth_rate_smart(phi_max_series, cfg.dt)
+    # Smart growth rate extraction — pass phi_rms as the fit series (less PIC noise)
+    # while phi_max is still used internally for saturation detection.
+    gamma, step_start, step_end = extract_growth_rate_smart(
+        phi_max_series, cfg.dt, phi_rms_series=phi_rms_series
+    )
     t_start = step_start * cfg.dt
     t_end   = step_end   * cfg.dt
 
