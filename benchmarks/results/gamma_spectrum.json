@@ -1,0 +1,64 @@
+{
+  "benchmark": "gamma_spectrum",
+  "reference": "Nevins et al. 2006 / GENE / GX",
+  "cbc_params": {
+    "R0_over_LT": 6.9,
+    "R0_over_Ln": 2.2,
+    "q0": 1.4,
+    "q1": 0.5,
+    "a": 0.18
+  },
+  "quick": false,
+  "N_particles": 300000,
+  "n_steps": 200,
+  "results": [
+    {
+      "k_mode": 6,
+      "ky_rho": 0.1017,
+      "gamma_measured": 0.0,
+      "gamma_reference": 0.055,
+      "error_pct": 100.0,
+      "status": "WARN"
+    },
+    {
+      "k_mode": 12,
+      "ky_rho": 0.2033,
+      "gamma_measured": 0.2006,
+      "gamma_reference": 0.11,
+      "error_pct": 82.36,
+      "status": "WARN"
+    },
+    {
+      "k_mode": 18,
+      "ky_rho": 0.305,
+      "gamma_measured": 0.4786,
+      "gamma_reference": 0.169,
+      "error_pct": 183.19,
+      "status": "WARN"
+    },
+    {
+      "k_mode": 24,
+      "ky_rho": 0.4067,
+      "gamma_measured": 0.18525,
+      "gamma_reference": 0.16,
+      "error_pct": 15.78,
+      "status": "PASS"
+    },
+    {
+      "k_mode": 30,
+      "ky_rho": 0.5083,
+      "gamma_measured": 0.14226,
+      "gamma_reference": 0.125,
+      "error_pct": 13.81,
+      "status": "PASS"
+    },
+    {
+      "k_mode": 36,
+      "ky_rho": 0.61,
+      "gamma_measured": 0.138,
+      "gamma_reference": 0.075,
+      "error_pct": 84.01,
+      "status": "WARN"
+    }
+  ]
+}
