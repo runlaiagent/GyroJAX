@@ -1,0 +1,38 @@
+{
+  "description": "KBM nonlinear saturation: phi_sat, chi_i, zonal vs beta (fast: 50k\u00d7200steps)",
+  "parameters": {
+    "N_particles": 50000,
+    "n_steps": 200,
+    "R_over_LT": 6.9
+  },
+  "devices": "[CudaDevice(id=0)]",
+  "results": [
+    {
+      "beta": 0.0,
+      "status": "ok",
+      "phi_sat": 1.952220070362091,
+      "w_rms_sat": 2.4524483346939085,
+      "phi_zonal_rms": 0.2638149857521057,
+      "chi_i": 0.025482458480890244,
+      "elapsed_s": 6.29867696762085
+    },
+    {
+      "beta": 0.01,
+      "status": "ok",
+      "phi_sat": 1.2904804742336273,
+      "w_rms_sat": 2.3455662822723387,
+      "phi_zonal_rms": 0.24793483316898346,
+      "chi_i": 0.03556362960649573,
+      "elapsed_s": 3.0166876316070557
+    },
+    {
+      "beta": 0.02,
+      "status": "ok",
+      "phi_sat": 1.290077487230301,
+      "w_rms_sat": 2.608304672241211,
+      "phi_zonal_rms": 0.22005823254585266,
+      "chi_i": 0.022804976805396702,
+      "elapsed_s": 3.1414482593536377
+    }
+  ]
+}
