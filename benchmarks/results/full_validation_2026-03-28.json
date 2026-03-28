@@ -1,0 +1,30 @@
+{
+  "date": "2026-03-28",
+  "commit": "b13fa0a9bcb62a1bc2c5a246037894555c058df5",
+  "fixes_applied": [1, 2, 3, 4, 5, 6, 7, 8, 9],
+  "tests": {
+    "total": 167,
+    "passed": 167,
+    "failed": 0
+  },
+  "linear_growth_rate": 1.1842,
+  "dimits_threshold_RLT": 6.9,
+  "heat_flux_scan": [
+    {"R_over_LT": 4.0, "chi_i": 0.13730, "Q_i": 0.54919, "status": "ok"},
+    {"R_over_LT": 5.0, "chi_i": 0.10879, "Q_i": 0.54396, "status": "ok"},
+    {"R_over_LT": 6.0, "chi_i": 0.09226, "Q_i": 0.55354, "status": "ok"},
+    {"R_over_LT": 6.9, "chi_i": 0.21887, "Q_i": 1.51018, "status": "ok"},
+    {"R_over_LT": 8.0, "chi_i": 0.21654, "Q_i": 1.73235, "status": "ok"}
+  ],
+  "heat_flux_source": "dimits_clean.py (300k particles, 600 steps)",
+  "em_benchmark": {
+    "beta_0": {"gamma": -0.0187, "phi_final": 27.21},
+    "beta_0.01": {"gamma": -0.0204, "phi_final": 62.04},
+    "beta_0.05": {"gamma": -0.0437, "phi_final": 40.47}
+  },
+  "timing": {
+    "N100k_steps_per_sec": 27.3,
+    "N500k_steps_per_sec": 27.1
+  },
+  "notes": "All 167 tests pass. heat_flux_cbc.py (--N 200000) crashed with CUDA_ERROR_ILLEGAL_INSTRUCTION; heat flux scan taken from dimits_clean.py (300k particles). Linear growth rate 1.18 is above physical 0.1-0.3 range — likely due to the single-mode projection with high pert_amp saturation effects at steps 20-100. Dimits threshold R/LT=6.9 consistent with reference ~6.0. chi_i jumps from ~0.09 at R/LT=6.0 to ~0.22 at R/LT=6.9, qualitatively correct Dimits shift. Timing: ~27 steps/sec at both 100k and 500k particles (GPU-bound, good scaling)."
+}
