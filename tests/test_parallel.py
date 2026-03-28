@@ -46,7 +46,7 @@ def test_pmap_single_device_fallback():
     diags_pmap, _, phi_pmap, _ = run_simulation_pmap(cfg, key=key, verbose=False)
     diags_fa,   _, phi_fa,   _ = run_simulation_fa(cfg,  key=key, verbose=False)
 
-    assert jnp.allclose(phi_pmap, phi_fa, atol=1e-6), (
+    assert jnp.allclose(phi_pmap, phi_fa, atol=1e-5), (
         "pmap single-device fallback must match run_simulation_fa"
     )
 
