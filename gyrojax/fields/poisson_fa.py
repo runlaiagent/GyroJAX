@@ -47,7 +47,7 @@ def _gamma0(b: jnp.ndarray) -> jnp.ndarray:
     return i0e(b)   # i0e(b) = I₀(b)·exp(-b) for b ≥ 0
 
 
-@jax.jit
+@functools.partial(jax.jit, static_argnames=('use_radial_gaa',))
 def solve_poisson_fa(
     delta_n: jnp.ndarray,
     geom: FieldAlignedGeometry,
@@ -56,6 +56,7 @@ def solve_poisson_fa(
     Ti: float,
     mi: float,
     e: float,
+    use_radial_gaa: bool = False,
 ) -> jnp.ndarray:
     """
     Solve GK Poisson in field-aligned coordinates with exact Γ₀(b).
@@ -116,6 +117,14 @@ def solve_poisson_fa(
 
     # Exact FLR operator
     G0 = _gamma0(b)   # Γ₀(b) = I₀(b)·e^{-b}
+
+    # Radially-resolved Γ₀: use g^αα(ψ) profile for FLR correction per radial shell.
+    # The inversion denominator still uses uniform g_aa_ref for spectral stability.
+    if use_radial_gaa:
+        g_aa_1d = geom.galphaalpha[:, Ntheta // 2]          # (Npsi,)
+        kperp_sq_rad = KPSI**2 + KAL**2 * g_aa_1d[:, None, None]  # (Npsi, Ntheta, Nalpha)
+        b_rad = kperp_sq_rad * rho_i_sq / 2.0
+        G0 = _gamma0(b_rad)   # (Npsi, Ntheta, Nalpha) — overrides uniform G0
 
     # GK Poisson operator in Fourier space:
     #   op = (Te/Ti)·(1 - Γ₀) + ρᵢ²·k²⊥
@@ -248,6 +257,53 @@ def gyroaverage_phi(
     phi_hat = jnp.fft.fftn(phi.astype(jnp.complex64))
     phi_gyro = jnp.fft.ifftn(J0_op * phi_hat).real
     return phi_gyro
+
+
+def gyroaverage_delta_n(
+    delta_n: jnp.ndarray,
+    geom: FieldAlignedGeometry,
+    Ti: float,
+    mi: float,
+    e: float,
+) -> jnp.ndarray:
+    """
+    Apply sqrt(Gamma0(b)) gyroaveraging operator to scattered delta_n in Fourier space.
+
+    delta_n_tilde = Gamma0^{1/2}(b) * delta_n_hat  (inverse FFT back to real space)
+
+    This is the correct GK scatter gyroaverage. Without this, the source term
+    in GK Poisson is too large at high k_perp (FLR effects underestimated).
+
+    b = k_perp^2 * rho_i^2 / 2  where k_perp^2 = kpsi^2 + kalpha^2 * g^{alphaalpha}(r0)
+    Gamma0^{1/2}(b) = sqrt(I0(b) * exp(-b)) = i0e(b)^{1/2}
+    """
+    Npsi, Ntheta, Nalpha = delta_n.shape
+    dpsi = (geom.psi_grid[-1] - geom.psi_grid[0]) / (Npsi - 1)
+    dal  = 2.0 * jnp.pi / Nalpha
+
+    Omega_i = e * geom.B0 / mi
+    rho_i_sq = Ti / (mi * Omega_i**2)
+
+    kpsi = (jnp.fft.fftfreq(Npsi,  d=dpsi) * 2 * jnp.pi).astype(jnp.float32)
+    kal  = (jnp.fft.fftfreq(Nalpha, d=dal) * 2 * jnp.pi).astype(jnp.float32)
+    KPSI, _, KAL = [x.astype(jnp.float32) for x in jnp.meshgrid(
+        kpsi,
+        jnp.zeros(Ntheta, dtype=jnp.float32),
+        kal, indexing='ij'
+    )]
+
+    Npsi_half = Npsi // 2
+    Ntheta_half = Ntheta // 2
+    g_aa_ref = geom.galphaalpha[Npsi_half, Ntheta_half]
+    kperp_sq = KPSI**2 + KAL**2 * g_aa_ref
+    b = kperp_sq * rho_i_sq / 2.0
+
+    # sqrt(Gamma0(b)) = sqrt(I0(b)*exp(-b))
+    sqrt_G0 = jnp.sqrt(jnp.maximum(i0e(b), 0.0))  # safe sqrt
+
+    dn_hat = jnp.fft.fftn(delta_n.astype(jnp.complex64))
+    dn_hat_ga = dn_hat * sqrt_G0  # apply sqrt(Gamma0)
+    return jnp.fft.ifftn(dn_hat_ga).real.astype(jnp.float32)
 
 
 def filter_single_mode(phi: jnp.ndarray, k_mode: int) -> jnp.ndarray:

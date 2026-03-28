@@ -33,7 +33,7 @@ from gyrojax.geometry.field_aligned import (
 from gyrojax.particles.guiding_center import GCState, init_maxwellian_particles
 from gyrojax.particles.guiding_center_fa import push_particles_fa, push_particles_and_weights_fa
 from gyrojax.deltaf.weights import update_weights, update_weights_cn, update_weights_semi_implicit, pullback_weights, soft_weight_damp, spread_weights, spread_weights_nonzonal
-from gyrojax.fields.poisson_fa import solve_poisson_fa, compute_efield_fa, compute_efield_fa_from_hat, filter_single_mode
+from gyrojax.fields.poisson_fa import solve_poisson_fa, compute_efield_fa, compute_efield_fa_from_hat, filter_single_mode, gyroaverage_delta_n
 from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa, gather_from_grid_fa, compute_particle_indices, scatter_with_indices, gather_with_indices
 from gyrojax.geometry.profiles import build_cbc_profiles, interp_profiles, krook_damping
 from gyrojax.collisions import apply_collisions
@@ -113,6 +113,8 @@ class SimConfigFA:
                                    # if False (default), use hard clamp (legacy behavior)
     # Electromagnetic — Phase 5
     beta: float = 0.0   # plasma beta — 0.0 = electrostatic (default), >0 = electromagnetic
+    gyroaverage_scatter: bool = True  # if True, apply sqrt(Gamma0(b)) to delta_n before Poisson
+    use_radial_gaa: bool = False      # if True, use g^αα(ψ) radial profile for Gamma0 FLR correction
 
 
 class DiagnosticsFA(NamedTuple):
@@ -223,7 +225,7 @@ def step_implicit_fa(
         # 5. Deposit and solve Poisson
         state_fa_new = state_new._replace(zeta=state_new.zeta % (2 * jnp.pi))
         delta_n_new = scatter_to_grid_fa(state_fa_new, geom, _gs) * cfg.n0_avg
-        phi_new, _ = solve_poisson_fa(delta_n_new, geom, cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e)
+        phi_new, _ = solve_poisson_fa(delta_n_new, geom, cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e, use_radial_gaa=cfg.use_radial_gaa)
 
         return iter_k + 1, _state_n, _phi_n, state_new, phi_new
 
@@ -478,7 +480,10 @@ def _run_with_geom(
                     delta_n = scatter_to_grid_fa(state_fa, geom, _gs) * cfg.n0_avg
 
                 # 2. solve poisson — Fix 1: cache phi_hat
-                phi, _phi_hat_cached = solve_poisson_fa(delta_n, geom, cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e)
+                # Fix 5: apply sqrt(Gamma0) gyroaveraging to delta_n before Poisson
+                if cfg.gyroaverage_scatter:
+                    delta_n = gyroaverage_delta_n(delta_n / cfg.n0_avg, geom, cfg.Ti, cfg.mi, cfg.e) * cfg.n0_avg
+                phi, _phi_hat_cached = solve_poisson_fa(delta_n, geom, cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e, use_radial_gaa=cfg.use_radial_gaa)
                 # Optional: suppress low-k alpha modes to prevent aliasing blowup
                 if cfg.k_alpha_min > 0:
                     phi_hat = jnp.fft.fft(phi, axis=-1)
@@ -680,6 +685,9 @@ def _run_with_geom(
             delta_n = scatter_to_grid_fa(state_fa, geom, grid_shape) * cfg.n0_avg
 
         # 2. Solve GK Poisson (exact Γ₀(b))
+        # Fix 5: apply sqrt(Gamma0) gyroaveraging to delta_n before Poisson
+        if cfg.gyroaverage_scatter:
+            delta_n = gyroaverage_delta_n(delta_n / cfg.n0_avg, geom, cfg.Ti, cfg.mi, cfg.e) * cfg.n0_avg
         if cfg.electron_model == 'drift_kinetic':
             # Use kinetic electron density from previous step
             delta_n_e_grid = scatter_to_grid_fa(e_state.markers, geom, grid_shape) * cfg.n0_avg
@@ -691,7 +699,8 @@ def _run_with_geom(
         else:
             phi, _phi_hat_py = solve_poisson_fa(
                 delta_n, geom,
-                cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e
+                cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e,
+                use_radial_gaa=cfg.use_radial_gaa
             )
         # Suppress low-k alpha modes to prevent aliasing blowup
         if cfg.k_alpha_min > 0:
