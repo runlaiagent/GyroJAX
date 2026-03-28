@@ -465,6 +465,15 @@ def _run_with_geom(
         vpar0_closed = vpar0_init
         mu0_closed   = mu0_init
 
+        # Hoist static geometry constants out of lax.scan body.
+        # These are computed from geom which is static and never changes during simulation.
+        # Avoids redundant per-step array indexing inside the JIT-compiled scan body.
+        _Nr_closed    = int(geom.psi_grid.shape[0])
+        _dr_closed    = float((geom.psi_grid[-1] - geom.psi_grid[0]) / (_Nr_closed - 1))
+        _psi_min_closed = float(geom.psi_grid[0]) * 1.001
+        _psi_max_closed = float(geom.psi_grid[-1]) * 0.999
+        _psi0_closed    = float(geom.psi_grid[0])
+
         def step_fn(carry, _):
             state, phi, nan_flag, step_count, A_par_prev = carry
 
@@ -473,9 +482,9 @@ def _run_with_geom(
                 B_p, gBpsi_p, gBth_p, kpsi_p, kth_p, g_aa_p = interp_fa_to_particles(
                     geom, state.r, state.theta, state.zeta
                 )
-                Nr = geom.psi_grid.shape[0]
-                dr = (geom.psi_grid[-1] - geom.psi_grid[0]) / (Nr - 1)
-                ir = jnp.clip((state.r - geom.psi_grid[0]) / dr, 0.0, Nr - 1.001)
+                Nr = _Nr_closed
+                dr = _dr_closed
+                ir = jnp.clip((state.r - _psi0_closed) / dr, 0.0, Nr - 1.001)
                 q_at_r_p = geom.q_profile[jnp.floor(ir).astype(jnp.int32)]
 
                 # 1. scatter — state.zeta is already field-aligned α; just mod 2π for grid lookup
@@ -537,8 +546,8 @@ def _run_with_geom(
 
                 # 4. push — using geometry at current (pre-push) positions
                 # (and optionally fused weight update via fused_rk4)
-                _psi_min = geom.psi_grid[0] * 1.001
-                _psi_max = geom.psi_grid[-1] * 0.999
+                _psi_min = _psi_min_closed
+                _psi_max = _psi_max_closed
                 if cfg.fused_rk4 and not (cfg.semi_implicit_weights or cfg.use_cn_weights):
                     # 4+6 combined: push + weight update in one RK4 pass
                     n0_p_fused, T_p_fused = _get_profiles(state.r, cfg)
