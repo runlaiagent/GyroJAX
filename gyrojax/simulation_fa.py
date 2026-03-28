@@ -70,6 +70,7 @@ class SimConfigFA:
     n0_avg: float = 1.0
     # CBC profiles
     R0_over_LT: float = 6.9
+    R0_over_LTe: float = 6.9   # electron temperature gradient (default = ion)
     R0_over_Ln: float = 2.2
     # Velocity cap (multiples of vti) to prevent runaway particles
     vpar_cap: float = 4.0
@@ -921,7 +922,8 @@ def _run_with_geom(
             else:
                 n0_e, Te_e_p = _get_profiles(new_e_markers.r, cfg)
                 d_lnn0_e = jnp.full_like(new_e_markers.r, -1.0 / Ln)
-                d_lnTe_e = jnp.full_like(new_e_markers.r, -1.0 / LT)
+                LTe = cfg.R0 / cfg.R0_over_LTe if cfg.R0_over_LTe != 0.0 else float('inf')
+                d_lnTe_e = jnp.full_like(new_e_markers.r, -1.0 / LTe)
                 q_e = _interp_q(new_e_markers.r, geom)
             new_e_markers = update_electron_weights(
                 new_e_markers, E_psi_e, E_theta_e, E_alpha_e,
