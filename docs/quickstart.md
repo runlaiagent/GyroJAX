@@ -128,3 +128,43 @@ Or run a specific benchmark:
 python benchmarks/dimits_shift.py
 python benchmarks/rosenbluth_hinton.py
 ```
+
+## Multi-GPU Runs
+
+GyroJAX supports multi-GPU parallelism via JAX `pmap`. The particle array is sharded
+across devices; the grid (φ, δn) is replicated and reduced via `AllReduce`.
+
+```python
+from gyrojax.parallel import run_simulation_pmap, get_device_count
+
+print(f"Available devices: {get_device_count()}")
+
+cfg = SimConfigFA(
+    N_particles=200_000,  # will be split evenly across GPUs
+    n_steps=500,
+    ...
+)
+
+# Automatically uses pmap on multi-GPU, falls back to single-GPU
+diags, state, phi, _ = run_simulation_pmap(cfg)
+```
+
+### Scaling
+
+| GPUs | Particles | Expected Speedup |
+|------|-----------|-----------------|
+| 1    | 50k       | 1× (baseline)   |
+| 2    | 100k      | ~1.8×           |
+| 4    | 200k      | ~3.5×           |
+| 8    | 400k      | ~6×             |
+
+> **Note:** Multi-GPU pmap requires identical GPU models for best performance.
+> Single-GPU fallback is automatic when only 1 device is detected.
+
+### Implementation Details
+
+- **Particle sharding**: `N_particles` rounded down to multiple of device count
+- **Grid**: full (Npsi × Ntheta × Nalpha) replicated on each device
+- **Scatter AllReduce**: `jax.lax.psum(delta_n, axis_name='devices')`
+- **Poisson solve**: replicated (each device gets identical φ)
+- **Memory**: each device holds `N/D` particles + 1 full grid copy
