@@ -1,0 +1,92 @@
+{
+  "description": "Nonlinear CBC heat flux scan: chi_i vs R/LT",
+  "parameters": {
+    "N_particles": 500000,
+    "n_steps": 600,
+    "dt": 0.05,
+    "noise_controls": "canonical_loading+pullback+weight_spread+nu_krook"
+  },
+  "devices": "[CudaDevice(id=0)]",
+  "results": [
+    {
+      "R0_over_LT": 4.0,
+      "status": "ok",
+      "Q_i_avg": 0.6063731908798218,
+      "chi_i_avg": 0.15159329771995544,
+      "phi_max_final": 0.5633324980735779,
+      "weight_rms_final": 0.4991445243358612,
+      "zonal_rms": 0.13512109220027924,
+      "elapsed_s": 10.256767272949219
+    },
+    {
+      "R0_over_LT": 5.0,
+      "status": "ok",
+      "Q_i_avg": 1.1439645290374756,
+      "chi_i_avg": 0.22879290580749512,
+      "phi_max_final": 0.7125726938247681,
+      "weight_rms_final": 0.7526499032974243,
+      "zonal_rms": 0.16748285293579102,
+      "elapsed_s": 6.545863628387451
+    },
+    {
+      "R0_over_LT": 6.0,
+      "status": "ok",
+      "Q_i_avg": 7.225687503814697,
+      "chi_i_avg": 1.204281250635783,
+      "phi_max_final": 1.351752758026123,
+      "weight_rms_final": 2.615623712539673,
+      "zonal_rms": 0.18149667978286743,
+      "elapsed_s": 6.616356611251831
+    },
+    {
+      "R0_over_LT": 6.5,
+      "status": "ok",
+      "Q_i_avg": 5.321254730224609,
+      "chi_i_avg": 0.8186545738807092,
+      "phi_max_final": 0.8353307843208313,
+      "weight_rms_final": 1.813360571861267,
+      "zonal_rms": 0.14679878950119019,
+      "elapsed_s": 6.6694252490997314
+    },
+    {
+      "R0_over_LT": 7.0,
+      "status": "ok",
+      "Q_i_avg": 14.556936264038086,
+      "chi_i_avg": 2.079562323434012,
+      "phi_max_final": 2.14717173576355,
+      "weight_rms_final": 2.9326117038726807,
+      "zonal_rms": 0.20567265152931213,
+      "elapsed_s": 6.689547777175903
+    },
+    {
+      "R0_over_LT": 8.0,
+      "status": "ok",
+      "Q_i_avg": -2.6654162406921387,
+      "chi_i_avg": -0.33317703008651733,
+      "phi_max_final": 1.836739182472229,
+      "weight_rms_final": 3.1106863021850586,
+      "zonal_rms": 0.2664411962032318,
+      "elapsed_s": 6.658268451690674
+    },
+    {
+      "R0_over_LT": 9.0,
+      "status": "ok",
+      "Q_i_avg": 19.35403823852539,
+      "chi_i_avg": 2.150448693169488,
+      "phi_max_final": 1.7448723316192627,
+      "weight_rms_final": 3.1941022872924805,
+      "zonal_rms": 0.21900202333927155,
+      "elapsed_s": 6.784534215927124
+    },
+    {
+      "R0_over_LT": 10.0,
+      "status": "ok",
+      "Q_i_avg": 8.245527267456055,
+      "chi_i_avg": 0.8245527267456054,
+      "phi_max_final": 2.545999526977539,
+      "weight_rms_final": 3.526578903198242,
+      "zonal_rms": 0.30689704418182373,
+      "elapsed_s": 6.454786539077759
+    }
+  ]
+}
