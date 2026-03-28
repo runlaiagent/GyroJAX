@@ -168,3 +168,43 @@ diags, state, phi, _ = run_simulation_pmap(cfg)
 - **Scatter AllReduce**: `jax.lax.psum(delta_n, axis_name='devices')`
 - **Poisson solve**: replicated (each device gets identical φ)
 - **Memory**: each device holds `N/D` particles + 1 full grid copy
+
+## Running from a TOML Input File
+
+GyroJAX supports TOML input files for reproducible, scriptable runs.
+
+### Generate a template
+
+```bash
+python -m gyrojax template myrun.toml
+```
+
+### Edit and run
+
+```toml
+# myrun.toml
+[simulation]
+N_particles = 100000
+n_steps = 500
+output_file = "results.h5"
+
+[physics]
+R0_over_LT = 6.9
+beta = 0.01
+
+[dtype]
+velocity = "bfloat16"   # save memory
+phi = "bfloat16"
+```
+
+```bash
+python -m gyrojax run myrun.toml --verbose
+```
+
+### Load in Python
+
+```python
+from gyrojax.io.input_file import load_config
+cfg = load_config("myrun.toml")
+# cfg is a fully-configured SimConfigFA, including DtypeConfig
+```
