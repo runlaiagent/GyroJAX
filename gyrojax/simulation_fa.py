@@ -1073,6 +1073,7 @@ def run_simulation_fa(
     cfg: SimConfigFA,
     key: jax.random.PRNGKey = None,
     verbose: bool = True,
+    init_state=None,
 ) -> tuple:
     """
     Run a gyrokinetic δf simulation in s-α field-aligned coordinates.
@@ -1106,7 +1107,119 @@ def run_simulation_fa(
         def _scatter_fn(state, geom_, grid_shape):
             return scatter_blocked(state, geom_, grid_shape, block_size=_bs)
 
-    return _run_with_geom(cfg, geom, key, verbose=verbose, scatter_fn=_scatter_fn, gather_fn=_gather_fn)
+    return _run_with_geom(cfg, geom, key, verbose=verbose, scatter_fn=_scatter_fn, gather_fn=_gather_fn, state0_override=init_state)
+
+
+def run_long_simulation_fa(
+    cfg: SimConfigFA,
+    n_total_steps: int,
+    chunk_size: int = 200,
+    output_file: str = "",
+    key=None,
+    verbose: bool = True,
+) -> dict:
+    """Run a long simulation in chunks to avoid GPU OOM.
+
+    Runs `n_total_steps` total steps in chunks of `chunk_size`.
+    After each chunk, diagnostic arrays are transferred to CPU and
+    GPU memory is freed before the next chunk.
+
+    Args:
+        cfg: SimConfigFA (n_steps field is overridden by chunk_size)
+        n_total_steps: total number of steps to run
+        chunk_size: steps per lax.scan chunk (default 200)
+        output_file: if set, append each chunk to HDF5 file
+        key: JAX PRNGKey (optional)
+        verbose: print progress
+
+    Returns:
+        dict with keys:
+          'phi_rms': np.ndarray of shape (n_total_steps,)
+          'phi_max': np.ndarray of shape (n_total_steps,)
+          'weight_rms': np.ndarray of shape (n_total_steps,)
+          'chi_i': float — final heat flux estimate
+          'n_steps': int — total steps completed
+          'output_file': str — path to HDF5 if saved
+    """
+    import numpy as np
+    import gc
+
+    if key is None:
+        key = jax.random.PRNGKey(0)
+
+    n_chunks = (n_total_steps + chunk_size - 1) // chunk_size
+
+    all_phi_rms = []
+    all_phi_max = []
+    all_weight_rms = []
+
+    if verbose:
+        print(f"[long run] {n_total_steps} steps in {n_chunks} chunks of {chunk_size}")
+        print(f"[long run] Grid: {cfg.Npsi}×{cfg.Ntheta}×{cfg.Nalpha}, {cfg.N_particles} particles")
+
+    current_state = None
+    writer_initialized = False
+
+    for chunk_idx in range(n_chunks):
+        steps_this_chunk = min(chunk_size, n_total_steps - chunk_idx * chunk_size)
+        cfg_dict = cfg._asdict() if hasattr(cfg, '_asdict') else vars(cfg)
+        chunk_cfg = SimConfigFA(**{**cfg_dict, 'n_steps': steps_this_chunk})
+
+        if verbose:
+            print(f"[chunk {chunk_idx+1}/{n_chunks}] steps {chunk_idx*chunk_size}–{chunk_idx*chunk_size+steps_this_chunk-1}", flush=True)
+
+        diags, current_state, phi_history, aux = run_simulation_fa(
+            chunk_cfg, key=key, verbose=False,
+            init_state=current_state,
+        )
+
+        chunk_phi_rms = np.array([float(d.phi_rms) for d in diags])
+        chunk_phi_max = np.array([float(d.phi_max) for d in diags])
+        chunk_weight_rms = np.array([float(d.weight_rms) for d in diags])
+
+        all_phi_rms.append(chunk_phi_rms)
+        all_phi_max.append(chunk_phi_max)
+        all_weight_rms.append(chunk_weight_rms)
+
+        if output_file:
+            from gyrojax.io.checkpoint import save_run, append_run
+            step_offset = chunk_idx * chunk_size
+            if not writer_initialized:
+                # Build geom for save_run
+                from gyrojax.geometry.field_aligned import build_field_aligned_geometry
+                geom = build_field_aligned_geometry(
+                    Npsi=cfg.Npsi, Ntheta=cfg.Ntheta, Nalpha=cfg.Nalpha,
+                    R0=cfg.R0, a=cfg.a, B0=cfg.B0, q0=cfg.q0, q1=cfg.q1,
+                )
+                save_run(output_file, diags, current_state, phi_history, geom, chunk_cfg, step_offset=step_offset)
+                writer_initialized = True
+            else:
+                append_run(output_file, diags, current_state, phi_history, step_offset=step_offset)
+
+        del phi_history
+        del diags
+        gc.collect()
+
+        key = jax.random.fold_in(key, chunk_idx)
+
+    phi_rms = np.concatenate(all_phi_rms)
+    phi_max = np.concatenate(all_phi_max)
+    weight_rms = np.concatenate(all_weight_rms)
+
+    if len(phi_max) > 10:
+        last_q = phi_max[3*len(phi_max)//4:]
+        chi_i = float(np.mean(last_q**2))
+    else:
+        chi_i = float(phi_max[-1]**2)
+
+    return {
+        'phi_rms': phi_rms,
+        'phi_max': phi_max,
+        'weight_rms': weight_rms,
+        'chi_i': chi_i,
+        'n_steps': n_total_steps,
+        'output_file': output_file,
+    }
 
 
 def run_benchmark(
