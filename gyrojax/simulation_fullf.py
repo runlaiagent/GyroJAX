@@ -81,6 +81,8 @@ class SimConfigFullF:
     k_alpha_min: int = 0
     # Warmup steps with reduced perturbation
     n_steps_warmup: int = 0
+    # Electromagnetic: plasma beta (0.0 = electrostatic)
+    beta: float = 0.0
 
 
 class DiagnosticsFullF(NamedTuple):
@@ -211,6 +213,7 @@ def run_simulation_fullf(
 
     q_over_m = cfg.e / cfg.mi
     phi = jnp.zeros(grid_shape, dtype=jnp.float32)
+    A_par_prev = jnp.zeros(grid_shape, dtype=jnp.float32)
     diags: List[DiagnosticsFullF] = []
 
     for step in range(cfg.n_steps):
@@ -245,6 +248,18 @@ def run_simulation_fullf(
         # 3. Gather E to particles
         E_psi_p, E_theta_p, E_alpha_p = gather_from_grid_fa(phi, state, geom)
 
+        # 3b. EM: Ampere solve for A∥, add inductive E∥ = -∂A∥/∂t
+        E_par_em_p = None
+        if cfg.beta > 0.0:
+            from gyrojax.fields.ampere_fa import scatter_jpar_to_grid, solve_ampere_fa
+            jpar_grid = scatter_jpar_to_grid(state, geom, grid_shape) * cfg.n0_avg
+            A_par = solve_ampere_fa(jpar_grid, geom, cfg.beta)
+            dA_dt_grid = (A_par - A_par_prev) / cfg.dt
+            dA_dt_p, _, _ = gather_from_grid_fa(dA_dt_grid, state, geom)
+            E_theta_p = E_theta_p - dA_dt_p
+            E_par_em_p = -dA_dt_p
+            A_par_prev = A_par
+
         # 4. Get B/gradB/curvature at particle positions
         B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p, g_aa_p = \
             interp_fa_to_particles(geom, state.r, state.theta, state.zeta)
@@ -255,6 +270,7 @@ def run_simulation_fullf(
             state, E_psi_p, E_theta_p, E_alpha_p,
             B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p,
             q_at_p, g_aa_p, q_over_m, cfg.mi, cfg.dt, cfg.R0,
+            E_par_em=E_par_em_p,
         )
 
         # 6. Boundary conditions + velocity clamp
