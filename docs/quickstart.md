@@ -208,3 +208,34 @@ from gyrojax.io.input_file import load_config
 cfg = load_config("myrun.toml")
 # cfg is a fully-configured SimConfigFA, including DtypeConfig
 ```
+
+## Post-Processing
+
+Load and analyze simulation output with `PostProcessor`:
+
+```python
+from gyrojax.io.postprocess import PostProcessor
+
+pp = PostProcessor("run.h5")
+
+# Print summary
+print(pp.summary())
+# {'n_steps': 500, 'growth_rate': 0.182, 'chi_i': 0.034, ...}
+
+# Growth rate from linear phase
+gamma = pp.growth_rate(t_start=50, t_end=200)
+print(f"γ = {gamma:.4f}")
+
+# Heat flux in saturation
+chi = pp.heat_flux_chi(saturation_start=300)
+print(f"χᵢ = {chi:.4f}")
+
+# Plot diagnostics
+pp.plot_growth(save="growth.png")
+pp.plot_zonal(save="zonal.png")
+
+# Raw arrays
+t = pp.time_axis()
+phi = pp.phi_max
+weight = pp.weight_rms
+```
