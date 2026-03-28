@@ -34,7 +34,7 @@ from gyrojax.particles.guiding_center import GCState, init_maxwellian_particles
 from gyrojax.particles.guiding_center_fa import push_particles_fa, push_particles_and_weights_fa
 from gyrojax.deltaf.weights import update_weights, update_weights_cn, update_weights_semi_implicit, pullback_weights, soft_weight_damp, spread_weights, spread_weights_nonzonal
 from gyrojax.fields.poisson_fa import solve_poisson_fa, compute_efield_fa, compute_efield_fa_from_hat, filter_single_mode, gyroaverage_delta_n
-from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa, gather_from_grid_fa, compute_particle_indices, scatter_with_indices, gather_with_indices
+from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa, scatter_blocked, gather_from_grid_fa, compute_particle_indices, scatter_with_indices, gather_with_indices
 from gyrojax.geometry.profiles import build_cbc_profiles, interp_profiles, krook_damping
 from gyrojax.collisions import apply_collisions
 
@@ -168,6 +168,7 @@ class SimConfigFA:
     gyroaverage_scatter: bool = True  # if True, apply sqrt(Gamma0(b)) to delta_n before Poisson
     use_radial_gaa: bool = True       # use g^αα(ψ) radial profile for Gamma0 FLR correction (clamped+tapered)
     fused_rk4: bool = True            # fuse particle push + weight update into single RK4 (3.78× speedup)
+    scatter_block_size: int = 0       # 0 = disabled (all-at-once); >0 = blocked scatter for L2 cache efficiency
                                       # Default False: slightly different trajectory breaks R-H test when True
     # I/O — output and checkpointing
     output_file:         str = ""     # path to HDF5 output file; "" = no file output
@@ -229,7 +230,7 @@ def step_implicit_fa(
     from gyrojax.geometry.field_aligned import interp_fa_to_particles
     from gyrojax.particles.guiding_center_fa import push_particles_fa
     from gyrojax.fields.poisson_fa import solve_poisson_fa
-    from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa, gather_from_grid_fa, compute_particle_indices, scatter_with_indices, gather_with_indices
+    from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa, scatter_blocked, gather_from_grid_fa, compute_particle_indices, scatter_with_indices, gather_with_indices
 
     Npsi, Ntheta, Nalpha = phi_n.shape
     _gs = (int(Npsi), int(Ntheta), int(Nalpha))
@@ -1087,7 +1088,15 @@ def run_simulation_fa(
         Npsi=cfg.Npsi, Ntheta=cfg.Ntheta, Nalpha=cfg.Nalpha,
         R0=cfg.R0, a=cfg.a, B0=cfg.B0, q0=cfg.q0, q1=cfg.q1,
     )
-    return _run_with_geom(cfg, geom, key, verbose=verbose)
+
+    # Wire blocked scatter if requested
+    _scatter_fn = None
+    if cfg.scatter_block_size > 0:
+        _bs = cfg.scatter_block_size  # capture as local for closure
+        def _scatter_fn(state, geom_, grid_shape):
+            return scatter_blocked(state, geom_, grid_shape, block_size=_bs)
+
+    return _run_with_geom(cfg, geom, key, verbose=verbose, scatter_fn=_scatter_fn)
 
 
 def run_benchmark(

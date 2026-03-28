@@ -304,3 +304,97 @@ def gather_with_indices(
                 + field[i1, j1, k1] *    wp *   wt *   wa )
 
     return trilinear(E_psi_g), trilinear(E_th_g), trilinear(E_al_g)
+
+
+# ---------------------------------------------------------------------------
+# Blocked scatter — L2 cache efficiency
+# ---------------------------------------------------------------------------
+
+@functools.partial(jax.jit, static_argnums=(2, 3))
+def scatter_blocked(
+    state,
+    geom: FieldAlignedGeometry,
+    grid_shape: tuple,
+    block_size: int = 4096,
+) -> jnp.ndarray:
+    """Scatter particles to grid in blocks for L2 cache efficiency.
+
+    Processes particles in blocks of `block_size` and accumulates results.
+    Pads the particle array to a multiple of block_size with zero-weight
+    particles (which contribute nothing to the grid).
+
+    On RTX 3070 Ti the L2 cache is 4 MB; a 16×32×32 float32 grid is 64 KB,
+    fitting ~64 times in L2.  With block_size=4096 each scatter block touches
+    only 4096 random grid cells instead of the full N, keeping the grid hot in
+    L2 and eliminating cache misses.
+
+    Args:
+        state: GCState with N particles
+        geom: FieldAlignedGeometry
+        grid_shape: (Npsi, Ntheta, Nalpha)
+        block_size: particles per block (default 4096)
+
+    Returns:
+        delta_n of shape grid_shape (normalised as in scatter_to_grid_fa)
+    """
+    N = state.r.shape[0]
+
+    # Pad to a multiple of block_size with zero-weight particles.
+    pad = (-N) % block_size
+    if pad > 0:
+        def _pad(x):
+            return jnp.concatenate([x, jnp.zeros(pad, dtype=x.dtype)])
+        state_p = jax.tree_util.tree_map(_pad, state)
+    else:
+        state_p = state
+
+    N_padded = N + pad
+    n_blocks  = N_padded // block_size
+
+    # Reshape each array: [N_padded] → [n_blocks, block_size]
+    state_blocked = jax.tree_util.tree_map(
+        lambda x: x.reshape(n_blocks, block_size), state_p
+    )
+
+    # Scatter a single block of shape [block_size] → grid (unnormalised)
+    def _scatter_raw_block(block_state) -> jnp.ndarray:
+        """Return unnormalised scatter grid for one block."""
+        Npsi, Ntheta, Nalpha = grid_shape
+        i0, i1, j0, j1, k0, k1, wp, wt, wa = _trilinear_weights_fa(
+            block_state.r, block_state.theta, block_state.zeta, geom, grid_shape
+        )
+        val  = block_state.weight.astype(jnp.float32)
+        size = Npsi * Ntheta * Nalpha
+        Nth_Nal = Ntheta * Nalpha
+        all_flat = jnp.concatenate([
+            i0 * Nth_Nal + j0 * Nalpha + k0,
+            i1 * Nth_Nal + j0 * Nalpha + k0,
+            i0 * Nth_Nal + j1 * Nalpha + k0,
+            i0 * Nth_Nal + j0 * Nalpha + k1,
+            i1 * Nth_Nal + j1 * Nalpha + k0,
+            i1 * Nth_Nal + j0 * Nalpha + k1,
+            i0 * Nth_Nal + j1 * Nalpha + k1,
+            i1 * Nth_Nal + j1 * Nalpha + k1,
+        ])
+        all_weights = jnp.concatenate([
+            val*(1-wp)*(1-wt)*(1-wa),
+            val*   wp *(1-wt)*(1-wa),
+            val*(1-wp)*   wt *(1-wa),
+            val*(1-wp)*(1-wt)*   wa,
+            val*   wp *   wt *(1-wa),
+            val*   wp *(1-wt)*   wa,
+            val*(1-wp)*   wt *   wa,
+            val*   wp *   wt *   wa,
+        ])
+        return jnp.zeros(size, dtype=jnp.float32).at[all_flat].add(all_weights).reshape(grid_shape)
+
+    # vmap over the leading n_blocks axis
+    grids = jax.vmap(_scatter_raw_block)(state_blocked)   # [n_blocks, Npsi, Ntheta, Nalpha]
+
+    raw_sum = grids.sum(axis=0)   # [Npsi, Ntheta, Nalpha]
+
+    # Apply the same normalisation as scatter_to_grid_fa:
+    # delta_n = (N_cells / N_particles) * raw_sum
+    size = grid_shape[0] * grid_shape[1] * grid_shape[2]
+    delta_n = raw_sum * (jnp.float32(size) / (jnp.float32(N) + jnp.float32(1e-30)))
+    return delta_n
