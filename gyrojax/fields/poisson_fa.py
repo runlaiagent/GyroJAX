@@ -89,12 +89,12 @@ def solve_poisson_fa(
     Omega_i = e * geom.B0 / mi
     rho_i_sq = Ti / (mi * Omega_i**2)
 
-    # Wavenumbers
-    kpsi = jnp.fft.fftfreq(Npsi,  d=dpsi) * 2 * jnp.pi    # (Npsi,)
-    kth  = jnp.fft.fftfreq(Ntheta, d=dth) * 2 * jnp.pi    # (Ntheta,)
-    kal  = jnp.fft.fftfreq(Nalpha, d=dal) * 2 * jnp.pi    # (Nalpha,)
+    # Wavenumbers (cast to float32 — fftfreq returns float64 with x64 enabled)
+    kpsi = (jnp.fft.fftfreq(Npsi,  d=dpsi) * 2 * jnp.pi).astype(jnp.float32)
+    kth  = (jnp.fft.fftfreq(Ntheta, d=dth) * 2 * jnp.pi).astype(jnp.float32)
+    kal  = (jnp.fft.fftfreq(Nalpha, d=dal) * 2 * jnp.pi).astype(jnp.float32)
 
-    KPSI, KTH, KAL = jnp.meshgrid(kpsi, kth, kal, indexing='ij')  # (Npsi,Ntheta,Nalpha)
+    KPSI, KTH, KAL = [x.astype(jnp.float32) for x in jnp.meshgrid(kpsi, kth, kal, indexing='ij')]
 
     # g^{αα} at mid-radius, theta=0 (flux-tube approximation)
     # Using the full g_aa(psi,theta) in a 3D FFT operator causes the inner-psi
@@ -158,10 +158,10 @@ def compute_efield_fa(
     dth  = 2.0 * jnp.pi / Ntheta
     dal  = 2.0 * jnp.pi / Nalpha
 
-    kpsi = jnp.fft.fftfreq(Npsi,   d=dpsi) * 2 * jnp.pi
-    kth  = jnp.fft.fftfreq(Ntheta, d=dth ) * 2 * jnp.pi
-    kal  = jnp.fft.fftfreq(Nalpha, d=dal ) * 2 * jnp.pi
-    KPSI, KTH, KAL = jnp.meshgrid(kpsi, kth, kal, indexing='ij')
+    kpsi = (jnp.fft.fftfreq(Npsi,   d=dpsi) * 2 * jnp.pi).astype(jnp.float32)
+    kth  = (jnp.fft.fftfreq(Ntheta, d=dth)  * 2 * jnp.pi).astype(jnp.float32)
+    kal  = (jnp.fft.fftfreq(Nalpha, d=dal)  * 2 * jnp.pi).astype(jnp.float32)
+    KPSI, KTH, KAL = [x.astype(jnp.float32) for x in jnp.meshgrid(kpsi, kth, kal, indexing='ij')]
 
     phi_hat = jnp.fft.fftn(phi.astype(jnp.complex64))
 
@@ -199,11 +199,11 @@ def gyroaverage_phi(
     dpsi = (geom.psi_grid[-1] - geom.psi_grid[0]) / (Npsi - 1)
     dal  = 2.0 * jnp.pi / Nalpha
 
-    kpsi = jnp.fft.fftfreq(Npsi,   d=dpsi) * 2 * jnp.pi
-    kal  = jnp.fft.fftfreq(Nalpha, d=dal ) * 2 * jnp.pi
-    KPSI, _, KAL = jnp.meshgrid(kpsi,
+    kpsi = (jnp.fft.fftfreq(Npsi,   d=dpsi) * 2 * jnp.pi).astype(jnp.float32)
+    kal  = (jnp.fft.fftfreq(Nalpha, d=dal)  * 2 * jnp.pi).astype(jnp.float32)
+    KPSI, _, KAL = [x.astype(jnp.float32) for x in jnp.meshgrid(kpsi,
                                   jnp.zeros(Ntheta),
-                                  kal, indexing='ij')
+                                  kal, indexing='ij')]
 
     g_aa = geom.galphaalpha[:, :, None]
     kperp_sq = KPSI**2 + KAL**2 * g_aa
@@ -298,8 +298,8 @@ def solve_poisson_tridiag(
     # Wavenumber arrays
     dal = 2.0 * jnp.pi / Nalpha
     dth = 2.0 * jnp.pi / Ntheta
-    kth_arr = jnp.fft.fftfreq(Ntheta, d=dth) * 2 * jnp.pi   # (Ntheta,)
-    kal_arr = jnp.fft.fftfreq(Nalpha, d=dal) * 2 * jnp.pi   # (Nalpha,)
+    kth_arr = (jnp.fft.fftfreq(Ntheta, d=dth) * 2 * jnp.pi).astype(jnp.float32)
+    kal_arr = (jnp.fft.fftfreq(Nalpha, d=dal) * 2 * jnp.pi).astype(jnp.float32)
 
     # Build kperp_sq for all modes: shape (Nmodes, Npsi)
     KTH, KAL = jnp.meshgrid(kth_arr, kal_arr, indexing='ij')  # (Ntheta, Nalpha)
@@ -513,10 +513,10 @@ def solve_poisson_pade_fa(
     Omega_i  = e * geom.B0 / mi
     rho_i_sq = Ti / (mi * Omega_i**2)
 
-    kpsi = jnp.fft.fftfreq(Npsi,   d=dpsi) * 2 * jnp.pi
-    kth  = jnp.fft.fftfreq(Ntheta, d=2.0*jnp.pi/Ntheta) * 2 * jnp.pi
-    kal  = jnp.fft.fftfreq(Nalpha, d=dal ) * 2 * jnp.pi
-    KPSI, KTH, KAL = jnp.meshgrid(kpsi, kth, kal, indexing='ij')
+    kpsi = (jnp.fft.fftfreq(Npsi,   d=dpsi) * 2 * jnp.pi).astype(jnp.float32)
+    kth  = (jnp.fft.fftfreq(Ntheta, d=2.0*jnp.pi/Ntheta) * 2 * jnp.pi).astype(jnp.float32)
+    kal  = (jnp.fft.fftfreq(Nalpha, d=dal)  * 2 * jnp.pi).astype(jnp.float32)
+    KPSI, KTH, KAL = [x.astype(jnp.float32) for x in jnp.meshgrid(kpsi, kth, kal, indexing='ij')]
 
     g_aa = geom.galphaalpha[:, :, None]
     kperp_sq = KPSI**2 + KAL**2 * g_aa

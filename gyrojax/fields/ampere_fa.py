@@ -93,11 +93,11 @@ def solve_ampere_fa(
     dpsi = (geom.psi_grid[-1] - geom.psi_grid[0]) / (Npsi - 1)
     dal = 2.0 * jnp.pi / Nalpha
 
-    kpsi = jnp.fft.fftfreq(Npsi, d=dpsi) * 2 * jnp.pi    # (Npsi,)
-    kal  = jnp.fft.fftfreq(Nalpha, d=dal) * 2 * jnp.pi   # (Nalpha,)
-    kth  = jnp.fft.fftfreq(Ntheta, d=2.0 * jnp.pi / Ntheta) * 2 * jnp.pi  # (Ntheta,)
+    kpsi = (jnp.fft.fftfreq(Npsi, d=dpsi) * 2 * jnp.pi).astype(jnp.float32)
+    kal  = (jnp.fft.fftfreq(Nalpha, d=dal) * 2 * jnp.pi).astype(jnp.float32)
+    kth  = (jnp.fft.fftfreq(Ntheta, d=2.0 * jnp.pi / Ntheta) * 2 * jnp.pi).astype(jnp.float32)
 
-    KPSI, KTH, KAL = jnp.meshgrid(kpsi, kth, kal, indexing='ij')  # (Npsi, Ntheta, Nalpha)
+    KPSI, KTH, KAL = [x.astype(jnp.float32) for x in jnp.meshgrid(kpsi, kth, kal, indexing='ij')]
 
     # g^{αα} at mid-radius, theta=0 (flux-tube approximation, same as poisson_fa)
     Npsi_half = Npsi // 2

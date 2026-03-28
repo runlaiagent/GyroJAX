@@ -79,13 +79,13 @@ def solve_poisson_gk(
     rho_i_sq = Ti / (mi * Omega_i**2)   # ρi² = vti²/Ωi² = Ti/(mi*Ωi²)
 
     # FFT in all 3 directions
-    delta_n_hat = jnp.fft.fftn(delta_n)
+    delta_n_hat = jnp.fft.fftn(delta_n.astype(jnp.complex64))
 
-    # Wavenumbers
-    kr  = jnp.fft.fftfreq(Nr,  d=dr)  * 2 * jnp.pi
-    kth = jnp.fft.fftfreq(Ntheta, d=dth) * 2 * jnp.pi
-    kze = jnp.fft.fftfreq(Nzeta, d=dze)  * 2 * jnp.pi
-    KR, KTH, KZE = jnp.meshgrid(kr, kth, kze, indexing='ij')
+    # Wavenumbers (cast to float32)
+    kr  = (jnp.fft.fftfreq(Nr,  d=dr)  * 2 * jnp.pi).astype(jnp.float32)
+    kth = (jnp.fft.fftfreq(Ntheta, d=dth) * 2 * jnp.pi).astype(jnp.float32)
+    kze = (jnp.fft.fftfreq(Nzeta, d=dze)  * 2 * jnp.pi).astype(jnp.float32)
+    KR, KTH, KZE = [x.astype(jnp.float32) for x in jnp.meshgrid(kr, kth, kze, indexing='ij')]
 
     # Perpendicular wavenumber squared (ζ is parallel → don't include kζ in kperp)
     kperp_sq = KR**2 + KTH**2   # (Nr, Ntheta, Nzeta)
@@ -122,12 +122,12 @@ def compute_efield(
     dth = 2.0 * jnp.pi / Ntheta
     dze = 2.0 * jnp.pi / Nzeta
 
-    phi_hat = jnp.fft.fftn(phi)
+    phi_hat = jnp.fft.fftn(phi.astype(jnp.complex64))
 
-    kr  = jnp.fft.fftfreq(Nr,     d=dr)  * 2 * jnp.pi
-    kth = jnp.fft.fftfreq(Ntheta, d=dth) * 2 * jnp.pi
-    kze = jnp.fft.fftfreq(Nzeta,  d=dze) * 2 * jnp.pi
-    KR, KTH, KZE = jnp.meshgrid(kr, kth, kze, indexing='ij')
+    kr  = (jnp.fft.fftfreq(Nr,     d=dr)  * 2 * jnp.pi).astype(jnp.float32)
+    kth = (jnp.fft.fftfreq(Ntheta, d=dth) * 2 * jnp.pi).astype(jnp.float32)
+    kze = (jnp.fft.fftfreq(Nzeta,  d=dze) * 2 * jnp.pi).astype(jnp.float32)
+    KR, KTH, KZE = [x.astype(jnp.float32) for x in jnp.meshgrid(kr, kth, kze, indexing='ij')]
 
     E_r_hat     = -1j * KR  * phi_hat
     E_theta_hat = -1j * KTH * phi_hat
@@ -160,12 +160,12 @@ def gyroaverage_phi(
     gyroaveraged phi, same shape
     """
     Nr, Ntheta, Nzeta = phi.shape
-    phi_hat = jnp.fft.fftn(phi)
+    phi_hat = jnp.fft.fftn(phi.astype(jnp.complex64))
 
-    kr  = jnp.fft.fftfreq(Nr,     d=1.0/Nr)  * 2*jnp.pi / Nr
-    kth = jnp.fft.fftfreq(Ntheta, d=1.0/Ntheta) * 2*jnp.pi / Ntheta
-    kze = jnp.fft.fftfreq(Nzeta,  d=1.0/Nzeta)  * 2*jnp.pi / Nzeta
-    KR, KTH, _ = jnp.meshgrid(kr, kth, kze, indexing='ij')
+    kr  = (jnp.fft.fftfreq(Nr,     d=1.0/Nr)  * 2*jnp.pi / Nr).astype(jnp.float32)
+    kth = (jnp.fft.fftfreq(Ntheta, d=1.0/Ntheta) * 2*jnp.pi / Ntheta).astype(jnp.float32)
+    kze = (jnp.fft.fftfreq(Nzeta,  d=1.0/Nzeta)  * 2*jnp.pi / Nzeta).astype(jnp.float32)
+    KR, KTH, _ = [x.astype(jnp.float32) for x in jnp.meshgrid(kr, kth, kze, indexing='ij')]
 
     b = (KR**2 + KTH**2) * rho_i**2
     # Use Bessel approximation: Γ0 = exp(-b) for Pade approximant
