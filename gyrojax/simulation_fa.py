@@ -18,7 +18,7 @@ Time loop order:
 """
 
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import NamedTuple, List
 
 import jax
@@ -37,6 +37,57 @@ from gyrojax.fields.poisson_fa import solve_poisson_fa, compute_efield_fa, compu
 from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa, gather_from_grid_fa, compute_particle_indices, scatter_with_indices, gather_with_indices
 from gyrojax.geometry.profiles import build_cbc_profiles, interp_profiles, krook_damping
 from gyrojax.collisions import apply_collisions
+
+
+@dataclass
+class DtypeConfig:
+    """Per-component floating point precision control.
+
+    Safe to lower:
+      - velocity (vpar): bfloat16 OK — drift physics tolerant
+      - phi field: bfloat16 OK — Poisson solve still accurate
+      - mu: float16 OK — constant per particle, just stored
+
+    Unsafe to lower (keep float32):
+      - position (r, theta, zeta): trilinear index precision requires float32
+      - weight: weight equation is numerically sensitive
+      - delta_n: FFT requires float32+
+      - geom: gradient fields need float32
+
+    float64 opt-in (requires jax_enable_x64=True):
+      - weight_f64: True enables float64 weights for neoclassical precision runs
+    """
+    position: str = "float32"   # r, theta, zeta — DO NOT lower below float32
+    velocity: str = "float32"   # vpar
+    weight:   str = "float32"   # δf weights — keep float32 or raise to float64
+    mu:       str = "float32"   # magnetic moment (constant per particle)
+    phi:      str = "float32"   # electrostatic potential grid
+    A_par:    str = "float32"   # vector potential grid (EM runs)
+    delta_n:  str = "float32"   # density perturbation grid
+    geom:     str = "float32"   # interpolated geometry at particles
+
+    def jnp_dtype(self, name: str):
+        """Return jnp dtype object for component name."""
+        import jax.numpy as jnp
+        mapping = {
+            "float64": jnp.float64,
+            "float32": jnp.float32,
+            "bfloat16": jnp.bfloat16,
+            "float16": jnp.float16,
+        }
+        val = getattr(self, name, "float32")
+        return mapping.get(val, jnp.float32)
+
+
+def _validate_dtype_config(dc: DtypeConfig):
+    """Warn about unsafe dtype combinations."""
+    import warnings
+    if dc.position in ("float16", "bfloat16"):
+        warnings.warn("position dtype bfloat16/float16 may corrupt trilinear interpolation", stacklevel=3)
+    if dc.weight in ("float16", "bfloat16"):
+        warnings.warn("weight dtype below float32 may cause numerical instability", stacklevel=3)
+    if dc.delta_n in ("float16", "bfloat16"):
+        warnings.warn("delta_n dtype below float32 may corrupt FFT in Poisson solver", stacklevel=3)
 
 
 @dataclass
@@ -121,6 +172,7 @@ class SimConfigFA:
     # I/O — output and checkpointing
     output_file:         str = ""     # path to HDF5 output file; "" = no file output
     checkpoint_interval: int = 0      # save checkpoint every N steps (0 = only at end)
+    dtype_config: DtypeConfig = field(default_factory=DtypeConfig)
 
 
 class DiagnosticsFA(NamedTuple):
@@ -312,6 +364,17 @@ def _run_with_geom(
         weight=jnp.zeros(cfg.N_particles, dtype=jnp.float32),
     )
 
+    # Cast to configured dtypes
+    dc = cfg.dtype_config
+    state = state._replace(
+        r=state.r.astype(dc.jnp_dtype("position")),
+        theta=state.theta.astype(dc.jnp_dtype("position")),
+        zeta=state.zeta.astype(dc.jnp_dtype("position")),
+        vpar=state.vpar.astype(dc.jnp_dtype("velocity")),
+        mu=state.mu.astype(dc.jnp_dtype("mu")),
+        weight=state.weight.astype(dc.jnp_dtype("weight")),
+    )
+
     # Store initial (canonical) positions for pullback
     r0_init    = psi_p.astype(jnp.float32)
     vpar0_init = state_sa.vpar.astype(jnp.float32)
@@ -383,6 +446,7 @@ def _run_with_geom(
         state = state0_override
 
     phi = jnp.zeros((Npsi, Ntheta, Nalpha))
+    phi = phi.astype(cfg.dtype_config.jnp_dtype("phi"))
     grid_shape = (Npsi, Ntheta, Nalpha)
     q_over_m = cfg.e / cfg.mi
     Ln = cfg.R0 / cfg.R0_over_Ln if cfg.R0_over_Ln != 0.0 else float('inf')
@@ -1016,6 +1080,8 @@ def run_simulation_fa(
     """
     if key is None:
         key = jax.random.PRNGKey(42)
+
+    _validate_dtype_config(cfg.dtype_config)
 
     geom = build_field_aligned_geometry(
         Npsi=cfg.Npsi, Ntheta=cfg.Ntheta, Nalpha=cfg.Nalpha,

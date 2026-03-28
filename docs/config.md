@@ -136,3 +136,44 @@ cfg = SimConfigFA(Npsi=32, N_particles=200_000, beta=0.01)
 | `gyroaverage_scatter` | bool | True | Apply √Γ₀(b) to δn before Poisson solve (symmetric gyroaveraging) |
 | `use_radial_gaa` | bool | True | Use radially-resolved g^αα(ψ) in Γ₀ operator (clamped+tapered) |
 | `fused_rk4` | bool | True | Fuse particle push + weight update into single RK4 (3.78× speedup) |
+
+## DtypeConfig — Precision Control
+
+`SimConfigFA.dtype_config` accepts a `DtypeConfig` dataclass to control floating-point precision per simulation component.
+
+```python
+from gyrojax.simulation_fa import SimConfigFA, DtypeConfig
+
+cfg = SimConfigFA(
+    ...,
+    dtype_config=DtypeConfig(
+        velocity="bfloat16",  # save ~50% velocity array memory
+        phi="bfloat16",       # save ~50% field memory
+    )
+)
+```
+
+### Component Reference
+
+| Component | Default | Can Lower To | Notes |
+|-----------|---------|--------------|-------|
+| `position` | float32 | ❌ (unsafe) | Trilinear index needs float32 |
+| `velocity` | float32 | bfloat16 ✅ | Drift dynamics tolerant |
+| `weight` | float32 | ❌ (unsafe) | Weight eq. numerically sensitive |
+| `mu` | float32 | float16 ✅ | Constant per particle |
+| `phi` | float32 | bfloat16 ✅ | Poisson solve still accurate |
+| `A_par` | float32 | bfloat16 ✅ | EM vector potential |
+| `delta_n` | float32 | ❌ (unsafe) | FFT requires float32+ |
+| `geom` | float32 | ❌ (unsafe) | Gradient fields need precision |
+
+### float64 Weights (Neoclassical Precision)
+
+For high-accuracy neoclassical runs (e.g. Rosenbluth-Hinton), raise weight precision:
+
+```python
+import jax
+with jax.experimental.enable_x64():
+    cfg = SimConfigFA(dtype_config=DtypeConfig(weight="float64"))
+```
+
+> ⚠️ float64 requires `jax_enable_x64=True` or `jax.experimental.enable_x64()` context.
