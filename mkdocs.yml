@@ -1,0 +1,42 @@
+site_name: GyroJAX
+site_description: GPU-accelerated gyrokinetic PIC simulation in JAX
+site_url: https://runlaiagent.github.io/GyroJAX
+repo_url: https://github.com/runlaiagent/GyroJAX
+repo_name: runlaiagent/GyroJAX
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: cyan
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: cyan
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - content.code.copy
+    - toc.integrate
+
+nav:
+  - Home: index.md
+  - Quick Start: quickstart.md
+  - Physics Model: physics.md
+  - Configuration Reference: config.md
+  - Benchmarks: benchmarks.md
+  - Contributing: contributing.md
+
+markdown_extensions:
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - admonition
+  - tables
+  - toc:
+      permalink: true

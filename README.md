@@ -1,5 +1,7 @@
 # GyroJAX
 
+📚 **[Full Documentation](https://runlaiagent.github.io/GyroJAX)** | 🚀 **[Quick Start](https://runlaiagent.github.io/GyroJAX/quickstart)**
+
 A gyrokinetic particle-in-cell (PIC) code for tokamak and stellarator plasma simulation, written entirely in [JAX](https://github.com/google/jax). Designed for research into ITG turbulence, zonal flows, and transport physics — fully JIT-compiled, multi-GPU capable, and benchmarked against published reference codes (GENE, GX, GTC).
 
 ---
