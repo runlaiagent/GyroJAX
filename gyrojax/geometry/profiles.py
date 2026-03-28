@@ -164,3 +164,87 @@ def krook_damping(
     new_weight = state.weight * factor
 
     return state._replace(weight=new_weight)
+
+
+# ========================================================================
+# New shape-controlled radial profile API (global_domain feature)
+# ========================================================================
+
+def make_LT_profile(psi_grid: jnp.ndarray, R0_over_LT_peak: float,
+                     profile: str = "flat", width: float = 0.5) -> jnp.ndarray:
+    """Return R0/LT(ψ) profile on the radial grid.
+
+    Args:
+        psi_grid: radial grid points (Npsi,)
+        R0_over_LT_peak: peak value of R0/LT
+        profile: "flat", "gaussian", or "tanh"
+        width: profile width (fraction of domain)
+
+    Returns:
+        R0_over_LT array of shape (Npsi,)
+    """
+    psi = psi_grid
+    psi_mid = 0.5 * (psi[0] + psi[-1])
+    psi_range = psi[-1] - psi[0]
+    x = (psi - psi_mid) / (width * psi_range)
+
+    if profile == "flat":
+        return jnp.ones_like(psi) * R0_over_LT_peak
+    elif profile == "gaussian":
+        return R0_over_LT_peak * jnp.exp(-x**2)
+    elif profile == "tanh":
+        return R0_over_LT_peak * 0.5 * (1.0 - jnp.tanh(2.0 * x))
+    else:
+        raise ValueError(f"Unknown profile: {profile}. Use 'flat', 'gaussian', or 'tanh'")
+
+
+def make_krook_mask(psi_grid: jnp.ndarray, buffer_width: float = 0.1,
+                    buffer_rate: float = 1.0) -> jnp.ndarray:
+    """Return Krook damping rate profile ν(ψ) — nonzero only in buffer zones.
+
+    Buffer zones at inner and outer radial boundaries damp unphysical
+    reflections in global simulations.
+
+    Args:
+        psi_grid: radial grid points (Npsi,)
+        buffer_width: width of each buffer zone (fraction of domain)
+        buffer_rate: peak Krook damping rate
+
+    Returns:
+        nu_krook array of shape (Npsi,) — zero in bulk, nonzero at boundaries
+    """
+    psi = psi_grid
+    L = psi[-1] - psi[0]
+    psi_inner = psi[0] + buffer_width * L
+    psi_outer = psi[-1] - buffer_width * L
+
+    # Inner buffer: smooth ramp from buffer_rate at psi[0] to 0 at psi_inner
+    inner_mask = jnp.where(
+        psi < psi_inner,
+        buffer_rate * ((psi_inner - psi) / (buffer_width * L))**2,
+        0.0
+    )
+
+    # Outer buffer: smooth ramp from 0 at psi_outer to buffer_rate at psi[-1]
+    outer_mask = jnp.where(
+        psi > psi_outer,
+        buffer_rate * ((psi - psi_outer) / (buffer_width * L))**2,
+        0.0
+    )
+
+    return inner_mask + outer_mask
+
+
+def apply_radial_profile_to_particles(r: jnp.ndarray, psi_grid: jnp.ndarray,
+                                       profile_values: jnp.ndarray) -> jnp.ndarray:
+    """Interpolate a radial profile to particle positions.
+
+    Args:
+        r: particle radial positions (N,)
+        psi_grid: radial grid (Npsi,)
+        profile_values: profile on grid (Npsi,)
+
+    Returns:
+        profile values at particle positions (N,)
+    """
+    return jnp.interp(r, psi_grid, profile_values)

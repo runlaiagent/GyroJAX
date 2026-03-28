@@ -127,6 +127,13 @@ class SimConfigFA:
     vpar_cap: float = 4.0
     # Global geometry flag
     use_global: bool = False   # True = global profiles, False = flux-tube
+    # Extended global domain controls (shape-controlled radial profiles + Krook buffers)
+    global_domain: bool = False          # alias for use_global with profile shape controls
+    LT_profile: str = "flat"             # "flat" | "gaussian" | "tanh" radial T profile shape
+    Ln_profile: str = "flat"             # "flat" | "gaussian" | "tanh" radial n profile shape
+    LT_profile_width: float = 0.5        # profile width (fraction of domain, for non-flat)
+    krook_buffer_width: float = 0.1      # buffer zone width (fraction of domain) at each boundary
+    krook_buffer_rate: float = 1.0       # Krook damping rate in buffer zones
     # Perturbation seeding
     pert_amp: float = 1e-2          # perturbation amplitude — use 1e-2 for single-mode benchmarks, 1e-4 for multi-mode
     zonal_init: bool = False        # if True, seed zonal flow (k_theta=0) for R-H/GAM tests
@@ -472,8 +479,10 @@ def _run_with_geom(
     e_state = init_electron_state(N_e, geom, e_cfg, ekey)
 
     # Build global profiles if requested
+    # global_domain is an alias for use_global with shape-controlled profiles
+    _use_global = cfg.use_global or cfg.global_domain
     global_profiles = None
-    if cfg.use_global:
+    if _use_global:
         global_profiles = build_cbc_profiles(
             Npsi=Npsi,
             a=cfg.a,
@@ -484,6 +493,17 @@ def _run_with_geom(
             R0_over_Ln=cfg.R0_over_Ln,
             n0_avg=cfg.n0_avg,
             Ti=cfg.Ti,
+        )
+    # If global_domain is set, build shape-controlled LT/Ln profiles for per-particle gradients
+    _gd_LT_profile = None
+    _gd_krook_profile = None
+    if cfg.global_domain:
+        from gyrojax.geometry.profiles import make_LT_profile, make_krook_mask
+        _gd_LT_profile = make_LT_profile(
+            geom.psi_grid, cfg.R0_over_LT, cfg.LT_profile, cfg.LT_profile_width
+        )
+        _gd_krook_profile = make_krook_mask(
+            geom.psi_grid, cfg.krook_buffer_width, cfg.krook_buffer_rate
         )
 
     # ------------------------------------------------------------------ #
@@ -930,11 +950,18 @@ def _run_with_geom(
 
                 # 5. Update δf weights
                 if True:  # always update weights
-                    if cfg.use_global and global_profiles is not None:
+                    if _use_global and global_profiles is not None:
                         # Global mode: per-particle profiles from radial interpolation
                         n0_p, T_p, _Te_p, q_at_r_p, d_ln_n0_dr, d_ln_T_dr = interp_profiles(
                             global_profiles, state.r
                         )
+                        # Override gradients with shape-controlled LT profile if global_domain
+                        if cfg.global_domain and _gd_LT_profile is not None:
+                            from gyrojax.geometry.profiles import apply_radial_profile_to_particles
+                            R0_over_LT_p = apply_radial_profile_to_particles(
+                                state.r, geom.psi_grid, _gd_LT_profile
+                            )
+                            d_ln_T_dr = -R0_over_LT_p / cfg.R0
                     else:
                         # Flux-tube mode: constant-gradient profiles (original behavior)
                         n0_p, T_p = _get_profiles(state.r, cfg)
@@ -960,8 +987,17 @@ def _run_with_geom(
                     )
 
                 # Apply Krook damping in buffer zones (global mode only)
-                if cfg.use_global and global_profiles is not None:
-                    state = krook_damping(state, global_profiles, cfg.dt)
+                if _use_global and global_profiles is not None:
+                    if cfg.global_domain and _gd_krook_profile is not None:
+                        # Shape-controlled Krook: apply per-particle damping from profile
+                        from gyrojax.geometry.profiles import apply_radial_profile_to_particles
+                        nu_krook_p = apply_radial_profile_to_particles(
+                            state.r, geom.psi_grid, _gd_krook_profile
+                        )
+                        damping_factor = jnp.exp(-nu_krook_p * cfg.dt)
+                        state = state._replace(weight=state.weight * damping_factor)
+                    else:
+                        state = krook_damping(state, global_profiles, cfg.dt)
 
         # Soft amplitude-dependent weight damping
         if cfg.nu_soft > 0.0:
@@ -1010,7 +1046,7 @@ def _run_with_geom(
             B_e, gBpsi_e, gBth_e, kpsi_e, kth_e, _g_aa_e = interp_fa_to_particles(
                 geom, new_e_markers.r, new_e_markers.theta, new_e_markers.zeta
             )
-            if cfg.use_global and global_profiles is not None:
+            if _use_global and global_profiles is not None:
                 n0_e, Te_e_p, _Te_e2, q_e, d_lnn0_e, d_lnTe_e = interp_profiles(global_profiles, new_e_markers.r)
             else:
                 n0_e, Te_e_p = _get_profiles(new_e_markers.r, cfg)
