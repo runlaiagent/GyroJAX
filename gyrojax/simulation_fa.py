@@ -34,7 +34,7 @@ from gyrojax.particles.guiding_center import GCState, init_maxwellian_particles
 from gyrojax.particles.guiding_center_fa import push_particles_fa, push_particles_and_weights_fa
 from gyrojax.deltaf.weights import update_weights, update_weights_cn, update_weights_semi_implicit, pullback_weights, soft_weight_damp, spread_weights, spread_weights_nonzonal
 from gyrojax.fields.poisson_fa import solve_poisson_fa, compute_efield_fa, compute_efield_fa_from_hat, filter_single_mode, gyroaverage_delta_n
-from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa, scatter_blocked, gather_from_grid_fa, compute_particle_indices, scatter_with_indices, gather_with_indices
+from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa, scatter_blocked, gather_from_grid_fa, compute_particle_indices, scatter_with_indices, gather_with_indices, scatter_bspline, gather_bspline
 from gyrojax.geometry.profiles import build_cbc_profiles, interp_profiles, krook_damping
 from gyrojax.collisions import apply_collisions
 
@@ -170,6 +170,7 @@ class SimConfigFA:
     fused_rk4: bool = True            # fuse particle push + weight update into single RK4 (3.78× speedup)
     scatter_block_size: int = 0       # 0 = disabled (all-at-once); >0 = blocked scatter for L2 cache efficiency
                                       # Default False: slightly different trajectory breaks R-H test when True
+    particle_shape: str = "cic"       # "cic" (default) or "bspline" (cubic B-spline M4, order-3)
     # I/O — output and checkpointing
     output_file:         str = ""     # path to HDF5 output file; "" = no file output
     checkpoint_interval: int = 0      # save checkpoint every N steps (0 = only at end)
@@ -320,6 +321,7 @@ def _run_with_geom(
     verbose: bool = True,
     state0_override=None,
     scatter_fn=None,   # optional override: fn(state, geom, grid_shape) -> delta_n
+    gather_fn=None,    # optional override: fn(phi, state, geom) -> (E_psi, E_theta, E_alpha)
 ) -> tuple:
     """
     Core simulation loop given a pre-built FieldAlignedGeometry.
@@ -847,11 +849,12 @@ def _run_with_geom(
 
         # 3. Gather E to particle positions (mod 2π on α for grid lookup)
         state_gather = state._replace(zeta=state.zeta % (2 * jnp.pi))
-        E_psi_p, E_theta_p, E_alpha_p = gather_from_grid_fa(phi, state_gather, geom)
+        _gfn = gather_fn if gather_fn is not None else gather_from_grid_fa
+        E_psi_p, E_theta_p, E_alpha_p = _gfn(phi, state_gather, geom)
 
         # 3b. EM correction: add ∂A∥/∂t contribution to E_theta (inductive E∥)
         if cfg.beta > 0.0 and dA_dt_grid is not None:
-            dA_dt_p, _, _ = gather_from_grid_fa(dA_dt_grid, state_gather, geom)
+            dA_dt_p, _, _ = _gfn(dA_dt_grid, state_gather, geom)
             E_theta_p = E_theta_p - dA_dt_p
             E_par_em_p = -dA_dt_p
         else:
@@ -1091,12 +1094,19 @@ def run_simulation_fa(
 
     # Wire blocked scatter if requested
     _scatter_fn = None
-    if cfg.scatter_block_size > 0:
+    _gather_fn = None
+    if cfg.particle_shape == "bspline":
+        _grid_shape = (cfg.Npsi, cfg.Ntheta, cfg.Nalpha)
+        def _scatter_fn(state, geom_, grid_shape):
+            return scatter_bspline(state, geom_, grid_shape)
+        def _gather_fn(phi, state, geom_):
+            return gather_bspline(phi, state, geom_, phi.shape)
+    elif cfg.scatter_block_size > 0:
         _bs = cfg.scatter_block_size  # capture as local for closure
         def _scatter_fn(state, geom_, grid_shape):
             return scatter_blocked(state, geom_, grid_shape, block_size=_bs)
 
-    return _run_with_geom(cfg, geom, key, verbose=verbose, scatter_fn=_scatter_fn)
+    return _run_with_geom(cfg, geom, key, verbose=verbose, scatter_fn=_scatter_fn, gather_fn=_gather_fn)
 
 
 def run_benchmark(

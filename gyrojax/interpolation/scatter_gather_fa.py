@@ -398,3 +398,135 @@ def scatter_blocked(
     size = grid_shape[0] * grid_shape[1] * grid_shape[2]
     delta_n = raw_sum * (jnp.float32(size) / (jnp.float32(N) + jnp.float32(1e-30)))
     return delta_n
+
+
+# ---------------------------------------------------------------------------
+# Cubic B-spline (M4) particle shape functions
+# ---------------------------------------------------------------------------
+
+def _bspline3_weights(x: jnp.ndarray) -> tuple:
+    """Cubic B-spline (M4) weights for a normalized position x in [0, N).
+
+    Returns (indices, weights) each of shape (N_particles, 4).
+    Each particle gets contributions from 4 grid points per dimension.
+
+    M4 kernel:
+      M4(u) = (4 - 6u^2 + 3|u|^3) / 6   for |u| <= 1
+      M4(u) = (2 - |u|)^3 / 6            for 1 < |u| <= 2
+      M4(u) = 0                           for |u| > 2
+    """
+    i0 = jnp.floor(x).astype(jnp.int32) - 1  # leftmost stencil index
+
+    weights = []
+    indices = []
+    for k in range(4):
+        u = jnp.abs(x - (i0 + k).astype(jnp.float32))
+        w = jnp.where(
+            u <= 1.0,
+            (4.0 - 6.0 * u**2 + 3.0 * u**3) / 6.0,
+            jnp.where(u <= 2.0, (2.0 - u)**3 / 6.0, 0.0),
+        ).astype(jnp.float32)
+        weights.append(w)
+        indices.append(i0 + k)
+
+    return jnp.stack(indices, axis=-1), jnp.stack(weights, axis=-1)
+
+
+@functools.partial(jax.jit, static_argnums=(2,))
+def scatter_bspline(
+    state,
+    geom: FieldAlignedGeometry,
+    grid_shape: tuple,
+) -> jnp.ndarray:
+    """Cubic B-spline scatter (order-3, M4 kernel).
+
+    Uses 4^3 = 64 grid points per particle (vs 8 for CIC).
+    Better spectral properties, less aliasing noise.
+    Returns normalised delta_n of shape grid_shape.
+    """
+    Npsi, Nth, Nal = grid_shape
+
+    psi_grid = geom.psi_grid
+    dr = (psi_grid[-1] - psi_grid[0]) / (Npsi - 1)
+    r_norm  = (state.r     - psi_grid[0]) / dr       # [0, Npsi)
+    th_norm = ((state.theta + jnp.pi) % (2 * jnp.pi)) / (2 * jnp.pi) * Nth  # [0, Nth)
+    al_norm = (state.zeta  % (2 * jnp.pi)) / (2 * jnp.pi) * Nal             # [0, Nal)
+
+    r_idx,  r_w  = _bspline3_weights(r_norm)
+    th_idx, th_w = _bspline3_weights(th_norm)
+    al_idx, al_w = _bspline3_weights(al_norm)
+
+    # Wrap / clamp indices
+    r_idx  = jnp.clip(r_idx, 0, Npsi - 1)
+    th_idx = th_idx % Nth
+    al_idx = al_idx % Nal
+
+    size = Npsi * Nth * Nal
+    val  = state.weight.astype(jnp.float32)
+
+    # Build all 64 (flat_idx, weight) pairs via concatenation — fully vectorised
+    all_flat    = []
+    all_weights = []
+    for ki in range(4):
+        for kj in range(4):
+            for kk in range(4):
+                w = val * r_w[:, ki] * th_w[:, kj] * al_w[:, kk]
+                fi = (r_idx[:, ki] * Nth + th_idx[:, kj]) * Nal + al_idx[:, kk]
+                all_flat.append(fi)
+                all_weights.append(w)
+
+    grid = jnp.zeros(size, dtype=jnp.float32).at[
+        jnp.concatenate(all_flat)
+    ].add(jnp.concatenate(all_weights))
+
+    n_particles = state.weight.shape[0]
+    delta_n = grid.reshape(grid_shape) * (
+        jnp.float32(size) / (jnp.float32(n_particles) + jnp.float32(1e-30))
+    )
+    return delta_n
+
+
+@functools.partial(jax.jit, static_argnums=(2,))
+def gather_bspline(
+    phi: jnp.ndarray,
+    state,
+    geom: FieldAlignedGeometry,
+    grid_shape: tuple,
+) -> tuple:
+    """Cubic B-spline gather of E-field from phi grid.
+
+    Returns (E_psi, E_theta, E_alpha) at particle positions.
+    """
+    from gyrojax.fields.poisson_fa import compute_efield_fa
+    E_psi_g, E_th_g, E_al_g = compute_efield_fa(phi, geom)
+
+    Npsi, Nth, Nal = grid_shape
+    psi_grid = geom.psi_grid
+    dr = (psi_grid[-1] - psi_grid[0]) / (Npsi - 1)
+    r_norm  = (state.r     - psi_grid[0]) / dr
+    th_norm = ((state.theta + jnp.pi) % (2 * jnp.pi)) / (2 * jnp.pi) * Nth
+    al_norm = (state.zeta  % (2 * jnp.pi)) / (2 * jnp.pi) * Nal
+
+    r_idx,  r_w  = _bspline3_weights(r_norm)
+    th_idx, th_w = _bspline3_weights(th_norm)
+    al_idx, al_w = _bspline3_weights(al_norm)
+
+    r_idx  = jnp.clip(r_idx, 0, Npsi - 1)
+    th_idx = th_idx % Nth
+    al_idx = al_idx % Nal
+
+    N = state.r.shape[0]
+    E_psi_p = jnp.zeros(N, dtype=jnp.float32)
+    E_th_p  = jnp.zeros(N, dtype=jnp.float32)
+    E_al_p  = jnp.zeros(N, dtype=jnp.float32)
+
+    for ki in range(4):
+        for kj in range(4):
+            for kk in range(4):
+                w  = r_w[:, ki] * th_w[:, kj] * al_w[:, kk]
+                ri = r_idx[:, ki]; ti = th_idx[:, kj]; ai = al_idx[:, kk]
+                E_psi_p = E_psi_p + w * E_psi_g[ri, ti, ai]
+                E_th_p  = E_th_p  + w * E_th_g[ri,  ti, ai]
+                E_al_p  = E_al_p  + w * E_al_g[ri,  ti, ai]
+
+    return E_psi_p, E_th_p, E_al_p
