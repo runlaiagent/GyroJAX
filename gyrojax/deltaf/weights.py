@@ -517,3 +517,51 @@ def spread_weights(state, geom, grid_shape):
 
     return state._replace(weight=w_new.astype(jnp.float32))
 
+
+def spread_weights_nonzonal(state, geom, grid_shape):
+    """
+    Weight spreading that preserves the zonal flow component.
+
+    Algorithm:
+    1. Compute zonal mean weight per radial bin: w_zonal[i] = mean(w[particles in bin i])
+    2. Subtract zonal mean: w_turb = w - w_zonal(r)
+    3. Apply spread_weights to w_turb only
+    4. Add back w_zonal: w_new = w_turb_spread + w_zonal(r)
+
+    This preserves radially-coherent (zonal) weight structure while smoothing
+    turbulent noise.
+    """
+    import jax.numpy as jnp
+    from gyrojax.interpolation.scatter_gather_fa import scatter_weights_raw_fa, gather_scalar_from_grid_fa
+
+    # Step 1: compute zonal mean weight per radial bin
+    # Use a simple binned average along psi
+    Npsi = grid_shape[0]
+    psi_min = geom.psi_grid[0]
+    psi_max = geom.psi_grid[-1]
+    dpsi = (psi_max - psi_min) / (Npsi - 1)
+
+    # Assign each particle to a radial bin
+    ir = jnp.clip(jnp.floor((state.r - psi_min) / dpsi).astype(jnp.int32), 0, Npsi - 1)
+
+    # Compute mean weight per bin using scatter/gather on 1D array
+    w_sum = jnp.zeros(Npsi, dtype=jnp.float32).at[ir].add(state.weight.astype(jnp.float32))
+    count = jnp.zeros(Npsi, dtype=jnp.float32).at[ir].add(1.0)
+    w_zonal_bins = w_sum / jnp.maximum(count, 1.0)  # (Npsi,)
+
+    # Step 2: subtract zonal mean from each particle weight
+    w_zonal_at_particle = w_zonal_bins[ir]  # (N,)
+    w_turb = state.weight.astype(jnp.float32) - w_zonal_at_particle
+
+    # Step 3: spread the turbulent (non-zonal) component
+    state_turb = state._replace(weight=w_turb)
+    w_grid = scatter_weights_raw_fa(state_turb, geom, grid_shape)
+    w_smooth = gather_scalar_from_grid_fa(w_grid, state_turb, geom)
+    scale = jnp.sum(jnp.abs(w_turb)) / (jnp.sum(jnp.abs(w_smooth)) + 1e-30)
+    w_turb_spread = w_smooth * scale
+
+    # Step 4: add zonal component back
+    w_new = w_turb_spread + w_zonal_at_particle
+
+    return state._replace(weight=w_new.astype(jnp.float32))
+
