@@ -121,10 +121,31 @@ def solve_poisson_fa(
     # Radially-resolved Γ₀: use g^αα(ψ) profile for FLR correction per radial shell.
     # The inversion denominator still uses uniform g_aa_ref for spectral stability.
     if use_radial_gaa:
-        g_aa_1d = geom.galphaalpha[:, Ntheta // 2]          # (Npsi,)
-        kperp_sq_rad = KPSI**2 + KAL**2 * g_aa_1d[:, None, None]  # (Npsi, Ntheta, Nalpha)
+        # Radially-resolved g^αα — use mid-theta profile and clamp to avoid
+        # boundary divergence (g^αα ~ q²/r² blows up at inner radius)
+        g_aa_1d = geom.galphaalpha[:, Ntheta // 2].astype(jnp.float32)  # (Npsi,)
+
+        # Clamp: never exceed 4× the mid-radius reference value
+        # This prevents overflow at inner boundary while preserving mid-radius accuracy
+        g_aa_clamped = jnp.clip(g_aa_1d, g_aa_ref * 0.1, g_aa_ref * 4.0)
+
+        # Smooth taper near boundaries: blend toward g_aa_ref within 15% of domain edge
+        # taper(x) = 1 at center, 0 at edges → g_aa_tapered = taper*g_aa_clamped + (1-taper)*g_aa_ref
+        psi_min = geom.psi_grid[0]
+        psi_max = geom.psi_grid[-1]
+        psi_range = psi_max - psi_min
+        taper_width = 0.15 * psi_range
+        psi_c = geom.psi_grid.astype(jnp.float32)
+        dist_from_edge = jnp.minimum(psi_c - psi_min, psi_max - psi_c)
+        taper = jnp.clip(dist_from_edge / taper_width, 0.0, 1.0)  # (Npsi,)
+
+        g_aa_rad = taper * g_aa_clamped + (1.0 - taper) * g_aa_ref  # (Npsi,)
+
+        # Build radially-resolved kperp_sq: shape (Npsi, Ntheta, Nalpha)
+        kperp_sq_rad = KPSI**2 + KAL**2 * g_aa_rad[:, None, None]
         b_rad = kperp_sq_rad * rho_i_sq / 2.0
-        G0 = _gamma0(b_rad)   # (Npsi, Ntheta, Nalpha) — overrides uniform G0
+        G0 = _gamma0(b_rad)   # overrides uniform G0
+        # Note: inversion denominator still uses uniform kperp_sq for spectral stability
 
     # GK Poisson operator in Fourier space:
     #   op = (Te/Ti)·(1 - Γ₀) + ρᵢ²·k²⊥
