@@ -27,13 +27,13 @@ class TestZonalInit:
     def test_zonal_init_flag_exists(self):
         """SimConfigFA accepts zonal_init parameter."""
         from gyrojax.simulation_fa import SimConfigFA
-        cfg = SimConfigFA(zonal_init=True, R0_over_LT=0.0, R0_over_Ln=0.0)
+        cfg = SimConfigFA(zonal_init=True, R0_over_LT=0.0, R0_over_Ln=0.0, fused_rk4=False)
         assert cfg.zonal_init is True
 
     def test_zero_drives(self):
         """R0_over_LT=0 and R0_over_Ln=0 accepted without error."""
         from gyrojax.simulation_fa import SimConfigFA
-        cfg = SimConfigFA(R0_over_LT=0.0, R0_over_Ln=0.0)
+        cfg = SimConfigFA(R0_over_LT=0.0, R0_over_Ln=0.0, fused_rk4=False)
         assert cfg.R0_over_LT == 0.0
         assert cfg.R0_over_Ln == 0.0
 
@@ -52,6 +52,7 @@ class TestRHBenchmarkQuick:
             pert_amp=1e-2, zonal_init=True,
             R0=1.0, a=0.18, B0=1.0, q0=1.4, q1=0.0,
             Ti=1.0, Te=1.0, mi=1.0, e=1000.0, vti=1.0, n0_avg=1.0,
+            fused_rk4=False,
         )
         key = jax.random.PRNGKey(0)
         diags, _, _, _ = run_simulation_fa(cfg, key, verbose=False)
@@ -73,6 +74,7 @@ class TestRHBenchmarkQuick:
             pert_amp=1e-2, zonal_init=True,
             R0=1.0, a=0.18, B0=1.0, q0=1.4, q1=0.0,
             Ti=1.0, Te=1.0, mi=1.0, e=1000.0, vti=1.0, n0_avg=1.0,
+            fused_rk4=False,
         )
         key = jax.random.PRNGKey(1)
         diags, _, _, _ = run_simulation_fa(cfg, key, verbose=False)

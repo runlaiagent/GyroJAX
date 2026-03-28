@@ -116,7 +116,7 @@ class SimConfigFA:
     beta: float = 0.0   # plasma beta — 0.0 = electrostatic (default), >0 = electromagnetic
     gyroaverage_scatter: bool = True  # if True, apply sqrt(Gamma0(b)) to delta_n before Poisson
     use_radial_gaa: bool = True       # use g^αα(ψ) radial profile for Gamma0 FLR correction (clamped+tapered)
-    fused_rk4: bool = False           # fuse particle push + weight update into single RK4 (3.78× speedup)
+    fused_rk4: bool = True            # fuse particle push + weight update into single RK4 (3.78× speedup)
                                       # Default False: slightly different trajectory breaks R-H test when True
 
 
