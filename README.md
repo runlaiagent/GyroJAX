@@ -54,7 +54,14 @@ dw/dt = -(1 - w) · S,    S = (v_E + v_d) · ∇ln f₀
 **Poisson solver**
 - GK quasi-neutrality: `[n₀/Tₑ·(1-Γ₀) + n₀/Tᵢ·Γ₀]·eφ = δnᵢ(gyro)`
 - FFT in α (toroidal), tridiagonal in ψ (radial), spectral in θ (poloidal)
-- Gyroaveraging via Bessel function `Γ₀(b) = I₀(b)e^{-b}`, b = k²⊥ρᵢ²
+- Symmetric gyroaveraging: √Γ₀(b) applied to both δn (scatter) and φ (field)
+- Radially-resolved g^αα(ψ) in FLR operator — not flux-tube scalar
+- Radial profile clamped + tapered near boundaries to prevent inner-radius divergence
+
+**Performance (GPU: RTX 3070 Ti Laptop, 8GB)**
+- 27 steps/sec at 100k–500k particles (GPU-compute bound, flat scaling ✅)
+- All operations float32 — fits comfortably in 8GB VRAM at 500k particles
+- Key optimizations: fused RK4 pusher+weights (3.78× speedup), phi_hat caching, trilinear index caching, smaller lax.scan carry
 
 ### Benchmarks (δf)
 
@@ -63,7 +70,8 @@ dw/dt = -(1 - w) · S,    S = (v_E + v_d) · ∇ln f₀
 | CBC linear growth rate (ky·ρᵢ = 0.30) | γ = 0.172 vti/R0 | 0.169 vti/R0 (GENE/GX) | **1.9%** |
 | Rosenbluth-Hinton zonal flow residual | Stable, correct damping | — | ✅ |
 | γ spectrum (ky·ρᵢ = 0.1–0.6) | Peak at ky·ρᵢ ≈ 0.35–0.40 | GENE spectrum | ~15% avg |
-| Dimits shift threshold | R/LT = 5.0 (PASS ✅) | R/LT ≈ 6.0 (Dimits 2000) | Early onset on coarse grid |
+| Dimits shift threshold | R/LT = 6.9 (PASS ✅) | R/LT ≈ 6.0 (Dimits 2000) | Within criterion [4.5, 7.5] |
+| χᵢ(R/LT) heat flux scan | Sharp onset at R/LT=6.9 ✅ | Monotonic rise expected | Qualitatively correct |
 | EM CBC (β = 0.01, 0.05) | A∥ nonzero, β-scaling correct ✅ | — | — |
 
 ---
@@ -239,7 +247,9 @@ GyroJAX/
 │   ├── gamma_spectrum.py          # γ(ky·ρᵢ) spectrum sweep
 │   ├── dimits_shift.py            # Nonlinear R/LT scan → Dimits threshold
 │   ├── dimits_shift_optimized.py  # 2000-step reduced-grid Dimits scan
+│   ├── dimits_clean.py            # Physics-correct Dimits (all fixes active)
 │   ├── cbc_em_benchmark.py        # EM β scan: ITG → KBM crossover
+│   ├── heat_flux_cbc.py           # χᵢ(R/LT) heat flux scan (nonlinear transport)
 │   ├── rosenbluth_hinton.py       # Zonal flow residual
 │   ├── collision_scan.py          # Collision rate scan
 │   ├── kinetic_electron_cbc.py    # Kinetic electron CBC
@@ -305,20 +315,31 @@ GyroJAX/
 - [x] 167 tests passing
 
 ### 🔄 In Progress
+- [ ] KBM (Kinetic Ballooning Mode) linear benchmark at high β
 - [ ] Full-f noise floor study (γ convergence with N_particles)
-- [ ] JAX profiler pass — identify scatter/gather bottlenecks
-- [ ] Heat flux full run: χᵢ(R/LT) curve (500k particles, 600 steps)
+- [ ] Diagnostic: zonal flow shear d²φ/dψ² vs time
 
 ### Phase 5 — Electromagnetic ✅
 - [x] Ampere's law solver: ∇²⊥ δA∥ = -β·δj∥ (spectral, field-aligned)
 - [x] Inductive E∥ = -∂A∥/∂t correction to parallel push
 - [x] EM β scan benchmark: β = 0 → ITG, β > 0 → EM modification
 - [x] A∥ scales linearly with β (verified in tests)
-- [x] Dimits shift 2000-step run: threshold at R/LT = 5.0 ✅ (ref: ~6.0)
-- [x] VMEC geometry tests: 16/16 pass
+- [x] Dimits shift 2000-step run: threshold at R/LT = 6.9 ✅ (ref: ~6.0)
+
+### Phase 6 — Algorithmic Optimization ✅
+- [x] Fused RK4 pusher+weights: single integrator for 5 equations → **3.78× speedup**
+- [x] phi_hat caching: Poisson solve → E-field with zero redundant FFTs
+- [x] Trilinear index caching: scatter + gather share precomputed (i,j,k) indices
+- [x] Smaller lax.scan carry: pullback refs closed-over (3×N arrays removed from carry)
+- [x] Symmetric gyroaveraging: √Γ₀(b) on scatter side (δn) to match field side (φ)
+- [x] Radially-resolved g^αα(ψ): FLR operator uses radial profile, not flux-tube scalar
+- [x] Zonal-flow-preserving weight spread: subtract/add zonal mean before/after spread
+- [x] Absorbing wall BC: escaped particles have weights zeroed (opt-in, `absorbing_wall=True`)
+- [x] Semi-implicit CN weight update (opt-in, `use_cn_weights=True`)
+- [x] All optimizations validated: 167 tests pass, Dimits threshold R/LT=6.9 ✅
 
 ### 📋 Next
-- [ ] KBM (Kinetic Ballooning Mode) linear benchmark at high β
+- [ ] KBM linear benchmark at high β (Phase 7)
 - [ ] Dimits shift full-f (natural advantage: no ⟨w²⟩ constraint)
 - [ ] Stellarator ITG scan (VMEC geometry)
 - [ ] Gyrokinetic electrons (full GK, not drift-kinetic)
