@@ -480,10 +480,12 @@ def _run_with_geom(
 
                 # 1. scatter — state.zeta is already field-aligned α; just mod 2π for grid lookup
                 state_fa = state._replace(zeta=state.zeta % (2 * jnp.pi))
+                # Compute trilinear indices once and reuse for scatter + gather (Fix: fuse index computation)
+                _indices = compute_particle_indices(state_fa, _gs, geom)
                 if scatter_fn is not None:
                     delta_n = scatter_fn(state_fa, geom, _gs) * cfg.n0_avg
                 else:
-                    delta_n = scatter_to_grid_fa(state_fa, geom, _gs) * cfg.n0_avg
+                    delta_n = scatter_with_indices(state_fa.weight, _indices, _gs) * cfg.n0_avg
 
                 # 2. solve poisson — Fix 1: cache phi_hat
                 # Fix 5: apply sqrt(Gamma0) gyroaveraging to delta_n before Poisson
@@ -513,15 +515,18 @@ def _run_with_geom(
                 else:
                     A_par = None
 
-                # 3. gather E — Fix 1 only: original gather_from_grid_fa
-                state_gather = state._replace(zeta=state.zeta % (2 * jnp.pi))
-                E_psi_p, E_theta_p, E_alpha_p = gather_from_grid_fa(phi, state_gather, geom)
+                # 3. gather E — use cached particle indices (fused scatter+gather)
+                state_gather = state_fa  # already has zeta % 2π
+                from gyrojax.fields.poisson_fa import compute_efield_fa
+                E_psi_g, E_th_g, E_al_g = compute_efield_fa(phi, geom)
+                E_psi_p, E_theta_p, E_alpha_p = gather_with_indices(E_psi_g, E_th_g, E_al_g, _indices)
 
                 # 3b. EM correction: add ∂A∥/∂t to E_theta (inductive E∥)
                 # E∥_eff = -∇∥φ - ∂A∥/∂t  ≈  E_theta - (A_par - A_par_prev)/dt
                 if cfg.beta > 0.0:
                     dA_dt_grid = (A_par - A_par_prev) / cfg.dt
-                    dA_dt_p, _, _ = gather_from_grid_fa(dA_dt_grid, state_gather, geom)
+                    _dA_psi_g, _dA_th_g, _dA_al_g = compute_efield_fa(dA_dt_grid, geom)
+                    dA_dt_p, _, _ = gather_with_indices(_dA_psi_g, _dA_th_g, _dA_al_g, _indices)
                     E_theta_p = E_theta_p - dA_dt_p
                     # E_par_em = -∂A∥/∂t gathered to particle positions
                     E_par_em_p = -dA_dt_p
@@ -670,18 +675,19 @@ def _run_with_geom(
             new_nan = nan_flag | jnp.any(jnp.isnan(new_phi)) | jnp.any(jnp.isinf(new_phi))
 
             # Verbose progress every 50 steps via jax.debug.print (host callback)
-            def _print_progress(args):
-                s, p, w = args
-                jax.debug.print(
-                    "  step {s}/{total}  |phi|_max={p:.3e}  |w|_rms={w:.3e}",
-                    s=s, total=cfg.n_steps, p=p, w=w,
+            if verbose:
+                def _print_progress(args):
+                    s, p, w = args
+                    jax.debug.print(
+                        "  step {s}/{total}  |phi|_max={p:.3e}  |w|_rms={w:.3e}",
+                        s=s, total=cfg.n_steps, p=p, w=w,
+                    )
+                jax.lax.cond(
+                    step_count % 50 == 0,
+                    _print_progress,
+                    lambda _: None,
+                    (step_count, diag.phi_max, diag.weight_rms),
                 )
-            jax.lax.cond(
-                step_count % 50 == 0,
-                _print_progress,
-                lambda _: None,
-                (step_count, diag.phi_max, diag.weight_rms),
-            )
             new_step_count = step_count + 1
 
             return (new_state, new_phi, new_nan, new_step_count, new_A_par), diag
