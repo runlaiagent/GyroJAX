@@ -87,3 +87,72 @@ class TestSimulationFASmoke:
         assert phi_late >= phi_early * 0.1, (
             f"phi collapsed: early={phi_early:.3e}, late={phi_late:.3e}"
         )
+
+from pathlib import Path
+
+
+class TestTEMSmoke:
+    """TEM (trapped electron mode) smoke tests — drift_kinetic electron model."""
+
+    def _tem_cfg(self, **kwargs):
+        base = dict(
+            Npsi=8, Ntheta=16, Nalpha=16,
+            N_particles=2_000,
+            n_steps=10,
+            dt=0.05,
+            R0_over_LT=0.0,     # no ion drive — isolate TEM
+            R0_over_Ln=2.2,
+            R0_over_LTe=9.0,    # strong electron drive
+            pert_amp=1e-4,
+            single_mode=True,
+            electron_model="drift_kinetic",
+            k_alpha_min=0,
+            use_pullback=False,
+        )
+        base.update(kwargs)
+        return SimConfigFA(**base)
+
+    def test_tem_runs_no_nan(self):
+        """TEM simulation runs 10 steps without NaN in phi."""
+        import jax
+        cfg = self._tem_cfg()
+        diags, state, phi, geom = run_simulation_fa(cfg, key=jax.random.PRNGKey(0), verbose=False)
+        assert not jnp.any(jnp.isnan(phi)), "NaN in phi with TEM"
+
+    def test_tem_phi_nonzero(self):
+        """TEM with strong electron drive produces nonzero phi."""
+        import jax
+        cfg = self._tem_cfg()
+        diags, state, phi, geom = run_simulation_fa(cfg, key=jax.random.PRNGKey(0), verbose=False)
+        assert float(jnp.max(jnp.abs(phi))) > 1e-8, "phi is zero in TEM run"
+
+    def test_tem_no_ion_drive(self):
+        """With R0_over_LT=0 and R0_over_LTe=0, phi should not blow up to infinity."""
+        import jax
+        cfg = self._tem_cfg(R0_over_LTe=0.0, R0_over_LT=0.0)  # no drive at all
+        diags, state, phi, geom = run_simulation_fa(cfg, key=jax.random.PRNGKey(0), verbose=False)
+        phi_vals = [float(d.phi_max) for d in diags]
+        # No drive: should not produce NaN or Inf, and should stay finite
+        assert all(np.isfinite(v) for v in phi_vals), "phi_max became non-finite with no drives"
+        assert float(jnp.max(jnp.abs(phi))) < 1e6, "phi blew up with no drives"
+
+    def test_tem_r0_over_lte_field_exists(self):
+        """SimConfigFA has R0_over_LTe field."""
+        cfg = SimConfigFA(R0_over_LTe=8.0)
+        assert cfg.R0_over_LTe == 8.0
+
+    def test_tem_output_file_h5(self, tmp_path):
+        """output_file writes valid HDF5 with diags and phi."""
+        import jax
+        try:
+            import h5py
+        except ImportError:
+            pytest.skip("h5py not installed")
+        out = str(tmp_path / "test_run.h5")
+        cfg = self._tem_cfg(output_file=out, R0_over_LTe=0.0, electron_model="boltzmann")
+        run_simulation_fa(cfg, key=jax.random.PRNGKey(0), verbose=False)
+        assert Path(out).exists(), "HDF5 file was not created"
+        with h5py.File(out, "r") as f:
+            assert "diags" in f
+            assert "phi" in f
+            assert "phi_max" in f["diags"]

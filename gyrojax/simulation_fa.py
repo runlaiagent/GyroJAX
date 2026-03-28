@@ -118,6 +118,9 @@ class SimConfigFA:
     use_radial_gaa: bool = True       # use g^αα(ψ) radial profile for Gamma0 FLR correction (clamped+tapered)
     fused_rk4: bool = True            # fuse particle push + weight update into single RK4 (3.78× speedup)
                                       # Default False: slightly different trajectory breaks R-H test when True
+    # I/O — output and checkpointing
+    output_file:         str = ""     # path to HDF5 output file; "" = no file output
+    checkpoint_interval: int = 0      # save checkpoint every N steps (0 = only at end)
 
 
 class DiagnosticsFA(NamedTuple):
@@ -697,6 +700,10 @@ def _run_with_geom(
             print(f"  Done. phi_max: {float(phi_arr[0]):.3e} → {float(phi_arr[-1]):.3e}")
             print(f"  weight_rms final: {float(diags_stacked.weight_rms[-1]):.3e}")
         diags = _DiagsList(diags_stacked)
+        # I/O: save to HDF5 if output_file is set
+        if cfg.output_file:
+            from gyrojax.io.checkpoint import save_run
+            save_run(cfg.output_file, diags, state, phi, geom, cfg)
         return diags, state, phi, geom
 
     # ------------------------------------------------------------------ #
@@ -967,6 +974,11 @@ def _run_with_geom(
         if float(w_rms) > weight_rms_warn:
             if verbose:
                 print(f"  ⚠️  weight_rms={float(w_rms):.3e} > {weight_rms_warn} at step {step}, possible blow-up")
+
+    # I/O: save to HDF5 if output_file is set
+    if cfg.output_file:
+        from gyrojax.io.checkpoint import save_run
+        save_run(cfg.output_file, diags, state, phi, geom, cfg)
 
     return diags, state, phi, geom
 
