@@ -111,21 +111,21 @@ class TestPoissonFA:
     def test_zero_rhs_gives_zero_phi(self, fa_geom):
         from gyrojax.fields.poisson_fa import solve_poisson_fa
         delta_n = jnp.zeros((32, 64, 32))
-        phi = solve_poisson_fa(delta_n, fa_geom, 1.0, 1.0, 1.0, 1.0, 1.0)
+        phi, _ = solve_poisson_fa(delta_n, fa_geom, 1.0, 1.0, 1.0, 1.0, 1.0)
         assert float(jnp.max(jnp.abs(phi))) < 1e-10
 
     def test_phi_real(self, fa_geom):
         from gyrojax.fields.poisson_fa import solve_poisson_fa
         key = jax.random.PRNGKey(0)
         delta_n = jax.random.normal(key, (32, 64, 32)) * 1e-4
-        phi = solve_poisson_fa(delta_n, fa_geom, 1.0, 1.0, 1.0, 1.0, 1.0)
+        phi, _ = solve_poisson_fa(delta_n, fa_geom, 1.0, 1.0, 1.0, 1.0, 1.0)
         assert phi.dtype in (jnp.float32, jnp.float64)
 
     def test_phi_mean_zero(self, fa_geom):
         from gyrojax.fields.poisson_fa import solve_poisson_fa
         key = jax.random.PRNGKey(1)
         delta_n = jax.random.normal(key, (32, 64, 32)) * 1e-4
-        phi = solve_poisson_fa(delta_n, fa_geom, 1.0, 1.0, 1.0, 1.0, 1.0)
+        phi, _ = solve_poisson_fa(delta_n, fa_geom, 1.0, 1.0, 1.0, 1.0, 1.0)
         assert float(jnp.mean(phi)) == pytest.approx(0.0, abs=1e-6)  # float32 round-trip
 
     def test_flr_reduces_amplitude(self, fa_geom):
@@ -139,7 +139,7 @@ class TestPoissonFA:
         al = jnp.linspace(0, 2*jnp.pi, Nalpha, endpoint=False)
         delta_n = jnp.array(1e-3 * jnp.sin(8 * al)[None, None, :] * jnp.ones((Npsi, Ntheta, Nalpha)))
 
-        phi_exact = solve_poisson_fa(delta_n, fa_geom, 1.0, 1.0, 1.0, 1.0, 1.0)
+        phi_exact, _ = solve_poisson_fa(delta_n, fa_geom, 1.0, 1.0, 1.0, 1.0, 1.0)
 
         # Exact solver should be numerically stable (no NaN)
         assert not bool(jnp.any(jnp.isnan(phi_exact))), "Exact Γ₀ solver produced NaN"

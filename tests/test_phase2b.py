@@ -124,6 +124,6 @@ class TestVMECCompatibilityWithFA:
         from gyrojax.fields.poisson_fa import solve_poisson_fa
         Ns, Nth, Nze = geom_li383.B_field.shape
         delta_n = jnp.zeros((Ns, Nth, Nze))
-        phi = solve_poisson_fa(delta_n, geom_li383, 1.0, 1.0, 1.0, 1.0, 1.0)
+        phi, _ = solve_poisson_fa(delta_n, geom_li383, 1.0, 1.0, 1.0, 1.0, 1.0)
         assert phi.shape == (Ns, Nth, Nze)
         assert float(jnp.max(jnp.abs(phi))) < 1e-10   # zero rhs → zero phi

@@ -268,4 +268,5 @@ def solve_poisson_with_ke(
     # Effective δn for Poisson: δn_i - δn_e
     # (δn_e is computed from electron markers, not from Boltzmann)
     delta_n_eff = delta_n_i - delta_n_e
-    return solve_poisson_fa(delta_n_eff, geom, n0_avg, Te, Ti, mi, e)
+    phi, _ = solve_poisson_fa(delta_n_eff, geom, n0_avg, Te, Ti, mi, e)
+    return phi

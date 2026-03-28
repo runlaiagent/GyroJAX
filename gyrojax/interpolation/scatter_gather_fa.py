@@ -229,3 +229,78 @@ def gather_from_grid_fa(
                 + field[i1, j1, k1] *    wp *   wt *   wa )
 
     return trilinear(E_psi_g), trilinear(E_th_g), trilinear(E_al_g)
+
+
+@functools.partial(jax.jit, static_argnums=(1,))
+def compute_particle_indices(
+    state,
+    grid_shape_tuple: tuple,
+    geom,
+):
+    """
+    Compute trilinear indices + weights for particle positions.
+    Returns (i0,i1,j0,j1,k0,k1,wp,wt,wa) — cache between scatter and gather.
+    """
+    return _trilinear_weights_fa(state.r, state.theta, state.zeta, geom, grid_shape_tuple)
+
+
+@functools.partial(jax.jit, static_argnums=(2,))
+def scatter_with_indices(
+    weight,
+    indices: tuple,
+    grid_shape: tuple,
+):
+    """Scatter particle weights to grid using pre-computed trilinear indices."""
+    Npsi, Ntheta, Nalpha = grid_shape
+    i0, i1, j0, j1, k0, k1, wp, wt, wa = indices
+    val  = weight.astype(jnp.float32)
+    size = Npsi * Ntheta * Nalpha
+    Nth_Nal = Ntheta * Nalpha
+
+    all_flat = jnp.concatenate([
+        i0 * Nth_Nal + j0 * Nalpha + k0,
+        i1 * Nth_Nal + j0 * Nalpha + k0,
+        i0 * Nth_Nal + j1 * Nalpha + k0,
+        i0 * Nth_Nal + j0 * Nalpha + k1,
+        i1 * Nth_Nal + j1 * Nalpha + k0,
+        i1 * Nth_Nal + j0 * Nalpha + k1,
+        i0 * Nth_Nal + j1 * Nalpha + k1,
+        i1 * Nth_Nal + j1 * Nalpha + k1,
+    ])
+    all_weights = jnp.concatenate([
+        val*(1-wp)*(1-wt)*(1-wa),
+        val*   wp *(1-wt)*(1-wa),
+        val*(1-wp)*   wt *(1-wa),
+        val*(1-wp)*(1-wt)*   wa,
+        val*   wp *   wt *(1-wa),
+        val*   wp *(1-wt)*   wa,
+        val*(1-wp)*   wt *   wa,
+        val*   wp *   wt *   wa,
+    ])
+    grid = jnp.zeros(size, dtype=jnp.float32).at[all_flat].add(all_weights)
+    n_particles = weight.shape[0]
+    delta_n = grid.reshape(grid_shape) * (jnp.float32(size) / (jnp.float32(n_particles) + jnp.float32(1e-30)))
+    return delta_n
+
+
+@jax.jit
+def gather_with_indices(
+    E_psi_g,
+    E_th_g,
+    E_al_g,
+    indices: tuple,
+) -> tuple:
+    """Gather pre-computed E-field grids to particle positions using cached trilinear indices."""
+    i0, i1, j0, j1, k0, k1, wp, wt, wa = indices
+
+    def trilinear(field):
+        return (  field[i0, j0, k0] * (1-wp)*(1-wt)*(1-wa)
+                + field[i1, j0, k0] *    wp *(1-wt)*(1-wa)
+                + field[i0, j1, k0] * (1-wp)*   wt *(1-wa)
+                + field[i0, j0, k1] * (1-wp)*(1-wt)*   wa
+                + field[i1, j1, k0] *    wp *   wt *(1-wa)
+                + field[i1, j0, k1] *    wp *(1-wt)*   wa
+                + field[i0, j1, k1] * (1-wp)*   wt *   wa
+                + field[i1, j1, k1] *    wp *   wt *   wa )
+
+    return trilinear(E_psi_g), trilinear(E_th_g), trilinear(E_al_g)

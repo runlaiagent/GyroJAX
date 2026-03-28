@@ -28,6 +28,7 @@ References:
 """
 
 from __future__ import annotations
+import functools
 import jax
 import jax.numpy as jnp
 from jax.scipy.special import i0e   # I₀(x)·exp(-x)  — numerically stable
@@ -138,7 +139,41 @@ def solve_poisson_fa(
     phi_hat = jnp.where(kperp_zero, 0.0 + 0j, phi_hat)
 
     phi = jnp.fft.ifftn(phi_hat).real
-    return phi
+    return phi, phi_hat
+
+
+@functools.partial(jax.jit, static_argnums=(2, 3, 4))
+def compute_efield_fa_from_hat(
+    phi_hat: jnp.ndarray,
+    geom: FieldAlignedGeometry,
+    Npsi: int,
+    Ntheta: int,
+    Nalpha: int,
+) -> tuple:
+    """
+    Compute E = -nabla phi from cached phi_hat (avoids redundant fftn).
+    static_argnums ensures Npsi/Ntheta/Nalpha are compile-time constants.
+
+    Returns E_psi, E_theta, E_alpha each (Npsi, Ntheta, Nalpha).
+    """
+    dpsi = (geom.psi_grid[-1] - geom.psi_grid[0]) / (Npsi - 1)
+    dth  = 2.0 * jnp.pi / Ntheta
+    dal  = 2.0 * jnp.pi / Nalpha
+
+    kpsi = (jnp.fft.fftfreq(Npsi,   d=dpsi) * 2 * jnp.pi).astype(jnp.float32)
+    kth  = (jnp.fft.fftfreq(Ntheta, d=dth)  * 2 * jnp.pi).astype(jnp.float32)
+    kal  = (jnp.fft.fftfreq(Nalpha, d=dal)  * 2 * jnp.pi).astype(jnp.float32)
+    KPSI, KTH, KAL = [x.astype(jnp.float32) for x in jnp.meshgrid(kpsi, kth, kal, indexing='ij')]
+
+    E_psi_hat = 1j * (-KPSI) * phi_hat
+    E_th_hat  = 1j * (-KTH)  * phi_hat
+    E_al_hat  = 1j * (-KAL)  * phi_hat
+
+    E_psi = jnp.fft.ifftn(E_psi_hat).real
+    E_th  = jnp.fft.ifftn(E_th_hat).real
+    E_al  = jnp.fft.ifftn(E_al_hat).real
+
+    return E_psi, E_th, E_al
 
 
 @jax.jit

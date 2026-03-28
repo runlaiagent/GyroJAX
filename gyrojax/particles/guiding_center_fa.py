@@ -150,3 +150,97 @@ def push_particles_fa(
 
     return GCState(r=new_psi, theta=new_theta, zeta=new_alpha,
                    vpar=new_vpar, mu=state.mu, weight=state.weight)
+
+
+@partial(jax.jit, static_argnames=('q_over_m', 'mi', 'dt', 'R0'))
+def push_particles_and_weights_fa(
+    state: GCState,
+    E_psi: jnp.ndarray,
+    E_theta: jnp.ndarray,
+    E_alpha: jnp.ndarray,
+    B: jnp.ndarray,
+    gBpsi: jnp.ndarray,
+    gBth: jnp.ndarray,
+    kpsi_geom: jnp.ndarray,
+    kth_geom: jnp.ndarray,
+    q_at_psi: jnp.ndarray,
+    g_aa_p: jnp.ndarray,
+    n0_p: jnp.ndarray,
+    T_p: jnp.ndarray,
+    d_ln_n0_dr: jnp.ndarray,
+    d_ln_T_dr: jnp.ndarray,
+    q_over_m: float,
+    mi: float,
+    dt: float,
+    R0: float,
+    E_par_em: jnp.ndarray = None,
+) -> GCState:
+    """
+    Fused RK4 integrator for GC equations + weight equation.
+
+    Integrates all 5 equations (ψ, θ, α, v∥, w) together in one RK4 pass,
+    computing drifts ONCE per RK4 stage instead of twice (as in separate
+    push_particles_fa + update_weights calls).
+    """
+    mu = state.mu  # constant adiabatic invariant
+
+    def full_rhs(psi, theta, alpha, vpar, weight):
+        Omega = q_over_m * B
+        safe_B = jnp.maximum(B, 1e-10)
+        safe_O = jnp.sign(Omega + 1e-20) * jnp.maximum(jnp.abs(Omega), 1e-10)
+        safe_r = jnp.maximum(psi, 1e-4)
+
+        # ExB drifts
+        vE_psi   =  q_at_psi * E_alpha / safe_B
+        vE_alpha = -E_psi / safe_B
+
+        # ∇B + curvature drifts (radial component)
+        vd_psi = -(mu / (mi * safe_O)) * gBth / safe_r \
+                 - (vpar**2 / safe_O) * kth_geom / safe_r
+
+        # GC equations of motion
+        dpsi_dt   = vE_psi + vd_psi
+        dtheta_dt = vpar / (q_at_psi * R0)
+        dalpha_dt = vE_alpha
+        dvpar_dt  = -(mu / mi) * gBpsi
+        if E_par_em is not None:
+            dvpar_dt = dvpar_dt + q_over_m * E_par_em
+
+        # Weight equation — reuses same drift (no redundant computation)
+        v_total_r = vE_psi + vd_psi
+
+        H = 0.5 * mi * vpar**2 + mu * B
+        d_lnf0_dr = d_ln_n0_dr - mu * gBpsi / T_p - H * d_ln_T_dr / T_p
+
+        dw_dt = -(1.0 - weight) * (v_total_r * d_lnf0_dr)
+
+        return dpsi_dt, dtheta_dt, dalpha_dt, dvpar_dt, dw_dt
+
+    r0, th0, al0, vp0, w0 = state.r, state.theta, state.zeta, state.vpar, state.weight
+
+    k1 = full_rhs(r0, th0, al0, vp0, w0)
+    k2 = full_rhs(r0 + 0.5*dt*k1[0], th0 + 0.5*dt*k1[1],
+                  al0 + 0.5*dt*k1[2], vp0 + 0.5*dt*k1[3], w0 + 0.5*dt*k1[4])
+    k3 = full_rhs(r0 + 0.5*dt*k2[0], th0 + 0.5*dt*k2[1],
+                  al0 + 0.5*dt*k2[2], vp0 + 0.5*dt*k2[3], w0 + 0.5*dt*k2[4])
+    k4 = full_rhs(r0 + dt*k3[0], th0 + dt*k3[1],
+                  al0 + dt*k3[2], vp0 + dt*k3[3], w0 + dt*k3[4])
+
+    def rk4_update(x0, k1i, k2i, k3i, k4i):
+        return x0 + (dt / 6) * (k1i + 2*k2i + 2*k3i + k4i)
+
+    new_psi   = rk4_update(r0,  k1[0], k2[0], k3[0], k4[0])
+    new_theta = rk4_update(th0, k1[1], k2[1], k3[1], k4[1])
+    new_alpha = rk4_update(al0, k1[2], k2[2], k3[2], k4[2])
+    new_vpar  = rk4_update(vp0, k1[3], k2[3], k3[3], k4[3])
+    new_w     = rk4_update(w0,  k1[4], k2[4], k3[4], k4[4])
+
+    # Wrap angles
+    new_theta = ((new_theta + jnp.pi) % (2*jnp.pi)) - jnp.pi
+    new_alpha = new_alpha % (2*jnp.pi)
+
+    # Soft weight limiter (consistent with update_weights)
+    new_w = 10.0 * jnp.tanh(new_w / 10.0)
+
+    return GCState(r=new_psi, theta=new_theta, zeta=new_alpha,
+                   vpar=new_vpar, mu=state.mu, weight=new_w.astype(jnp.float32))

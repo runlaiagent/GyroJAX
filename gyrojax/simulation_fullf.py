@@ -228,7 +228,7 @@ def run_simulation_fullf(
             delta_n = jnp.zeros_like(delta_n)
 
         # 2. Solve GK Poisson: δn → φ
-        phi = solve_poisson_fa(
+        phi, _ = solve_poisson_fa(
             delta_n, geom, cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e
         )
 

@@ -31,10 +31,10 @@ from gyrojax.geometry.field_aligned import (
     salpha_to_fa_coords,
 )
 from gyrojax.particles.guiding_center import GCState, init_maxwellian_particles
-from gyrojax.particles.guiding_center_fa import push_particles_fa
+from gyrojax.particles.guiding_center_fa import push_particles_fa, push_particles_and_weights_fa
 from gyrojax.deltaf.weights import update_weights, update_weights_cn, update_weights_semi_implicit, pullback_weights, soft_weight_damp, spread_weights
-from gyrojax.fields.poisson_fa import solve_poisson_fa, compute_efield_fa, filter_single_mode
-from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa, gather_from_grid_fa
+from gyrojax.fields.poisson_fa import solve_poisson_fa, compute_efield_fa, compute_efield_fa_from_hat, filter_single_mode
+from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa, gather_from_grid_fa, compute_particle_indices, scatter_with_indices, gather_with_indices
 from gyrojax.geometry.profiles import build_cbc_profiles, interp_profiles, krook_damping
 from gyrojax.collisions import apply_collisions
 
@@ -105,9 +105,12 @@ class SimConfigFA:
     implicit:        bool  = False   # use CN+Picard implicit scheme
     picard_max_iter: int   = 4       # max Picard iterations
     picard_tol:      float = 1e-3    # convergence tolerance on φ (L∞ norm)
-    semi_implicit_weights: bool = False  # semi-implicit CN weight update (no Picard, replaces RK4)
+    semi_implicit_weights: bool = True   # semi-implicit CN weight update (unconditionally stable)
+    use_cn_weights: bool = True          # alias for semi_implicit_weights
     # Electromagnetic — Phase 5
     beta: float = 0.0   # plasma beta — 0.0 = electrostatic (default), >0 = electromagnetic
+    # Fused RK4: integrate GC + weight equation together (avoids recomputing drifts)
+    fused_rk4: bool = True
 
 
 class DiagnosticsFA(NamedTuple):
@@ -164,7 +167,7 @@ def step_implicit_fa(
     from gyrojax.geometry.field_aligned import interp_fa_to_particles
     from gyrojax.particles.guiding_center_fa import push_particles_fa
     from gyrojax.fields.poisson_fa import solve_poisson_fa
-    from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa, gather_from_grid_fa
+    from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa, gather_from_grid_fa, compute_particle_indices, scatter_with_indices, gather_with_indices
 
     Npsi, Ntheta, Nalpha = phi_n.shape
     _gs = (int(Npsi), int(Ntheta), int(Nalpha))
@@ -218,7 +221,7 @@ def step_implicit_fa(
         # 5. Deposit and solve Poisson
         state_fa_new = state_new._replace(zeta=state_new.zeta % (2 * jnp.pi))
         delta_n_new = scatter_to_grid_fa(state_fa_new, geom, _gs) * cfg.n0_avg
-        phi_new = solve_poisson_fa(delta_n_new, geom, cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e)
+        phi_new, _ = solve_poisson_fa(delta_n_new, geom, cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e)
 
         return iter_k + 1, _state_n, _phi_n, state_new, phi_new
 
@@ -461,13 +464,15 @@ def _run_with_geom(
 
                 # 1. scatter — state.zeta is already field-aligned α; just mod 2π for grid lookup
                 state_fa = state._replace(zeta=state.zeta % (2 * jnp.pi))
+                # Fix 2: compute trilinear indices once for scatter+gather
+                _part_indices = compute_particle_indices(state_fa, _gs, geom)
                 if scatter_fn is not None:
                     delta_n = scatter_fn(state_fa, geom, _gs) * cfg.n0_avg
                 else:
-                    delta_n = scatter_to_grid_fa(state_fa, geom, _gs) * cfg.n0_avg
+                    delta_n = scatter_with_indices(state_fa.weight, _part_indices, _gs) * cfg.n0_avg
 
-                # 2. solve poisson
-                phi = solve_poisson_fa(delta_n, geom, cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e)
+                # 2. solve poisson — Fix 1: cache phi_hat
+                phi, _phi_hat_cached = solve_poisson_fa(delta_n, geom, cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e)
                 # Optional: suppress low-k alpha modes to prevent aliasing blowup
                 if cfg.k_alpha_min > 0:
                     phi_hat = jnp.fft.fft(phi, axis=-1)
@@ -491,9 +496,10 @@ def _run_with_geom(
                 else:
                     A_par = None
 
-                # 3. gather E — mod 2π on α for grid lookup
+                # 3. gather E — Fix 1+2: use cached phi_hat + cached particle indices
+                _E_psi_g, _E_th_g, _E_al_g = compute_efield_fa_from_hat(_phi_hat_cached, geom, *_gs)
                 state_gather = state._replace(zeta=state.zeta % (2 * jnp.pi))
-                E_psi_p, E_theta_p, E_alpha_p = gather_from_grid_fa(phi, state_gather, geom)
+                E_psi_p, E_theta_p, E_alpha_p = gather_with_indices(_E_psi_g, _E_th_g, _E_al_g, _part_indices)
 
                 # 3b. EM correction: add ∂A∥/∂t to E_theta (inductive E∥)
                 # E∥_eff = -∇∥φ - ∂A∥/∂t  ≈  E_theta - (A_par - A_par_prev)/dt
@@ -509,12 +515,24 @@ def _run_with_geom(
                     new_A_par = A_par_prev
 
                 # 4. push — using geometry at current (pre-push) positions
-                state = push_particles_fa(
-                    state, E_psi_p, E_theta_p, E_alpha_p,
-                    B_p, gBpsi_p, gBth_p, kpsi_p, kth_p, q_at_r_p, g_aa_p,
-                    q_over_m, cfg.mi, cfg.dt, geom.R0,
-                    E_par_em=E_par_em_p,
-                )
+                if cfg.fused_rk4:
+                    n0_p_fused, T_p_fused = _get_profiles(state.r, cfg)
+                    d_ln_n0_dr_fused = jnp.full_like(state.r, -1.0 / Ln)
+                    d_ln_T_dr_fused  = jnp.full_like(state.r, -1.0 / LT)
+                    state = push_particles_and_weights_fa(
+                        state, E_psi_p, E_theta_p, E_alpha_p,
+                        B_p, gBpsi_p, gBth_p, kpsi_p, kth_p, q_at_r_p, g_aa_p,
+                        n0_p_fused, T_p_fused, d_ln_n0_dr_fused, d_ln_T_dr_fused,
+                        q_over_m, cfg.mi, cfg.dt, geom.R0,
+                        E_par_em=E_par_em_p,
+                    )
+                else:
+                    state = push_particles_fa(
+                        state, E_psi_p, E_theta_p, E_alpha_p,
+                        B_p, gBpsi_p, gBth_p, kpsi_p, kth_p, q_at_r_p, g_aa_p,
+                        q_over_m, cfg.mi, cfg.dt, geom.R0,
+                        E_par_em=E_par_em_p,
+                    )
 
                 # 5. clamp r and vpar
                 state = state._replace(
@@ -529,13 +547,15 @@ def _run_with_geom(
                 d_ln_n0_dr = jnp.full_like(state.r, -1.0 / Ln)
                 d_ln_T_dr  = jnp.full_like(state.r, -1.0 / LT)
 
-                state = update_weights(
-                    state, E_psi_p, E_theta_p, E_alpha_p,
-                    B_p, gBpsi_p, gBth_p, kpsi_p, kth_p,
-                    q_at_r_p, n0_p, T_p,
-                    d_ln_n0_dr, d_ln_T_dr,
-                    q_over_m, cfg.mi, cfg.R0, cfg.dt,
-                )
+                if not cfg.fused_rk4:
+                    _scan_w_fn = update_weights_semi_implicit if (cfg.semi_implicit_weights or cfg.use_cn_weights) else update_weights
+                    state = _scan_w_fn(
+                        state, E_psi_p, E_theta_p, E_alpha_p,
+                        B_p, gBpsi_p, gBth_p, kpsi_p, kth_p,
+                        q_at_r_p, n0_p, T_p,
+                        d_ln_n0_dr, d_ln_T_dr,
+                        q_over_m, cfg.mi, cfg.R0, cfg.dt,
+                    )
 
                 # Improvement 3: Soft amplitude-dependent weight damping
                 if cfg.nu_soft > 0.0:
@@ -665,7 +685,7 @@ def _run_with_geom(
                 cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e
             )
         else:
-            phi = solve_poisson_fa(
+            phi, _phi_hat_py = solve_poisson_fa(
                 delta_n, geom,
                 cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e
             )
@@ -716,12 +736,29 @@ def _run_with_geom(
         else:
             # ---- Explicit RK4 step ----
             # 4. Push guiding centers (RK4)
-            state = push_particles_fa(
-                state, E_psi_p, E_theta_p, E_alpha_p,
-                B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p, q_at_r_p, g_aa_p,
-                q_over_m, cfg.mi, cfg.dt, geom.R0,
-                E_par_em=E_par_em_p,
-            )
+            if cfg.fused_rk4:
+                if cfg.use_global and global_profiles is not None:
+                    n0_p_f, T_p_f, _Te_p_f, _q_f, d_ln_n0_dr_f, d_ln_T_dr_f = interp_profiles(
+                        global_profiles, state.r
+                    )
+                else:
+                    n0_p_f, T_p_f = _get_profiles(state.r, cfg)
+                    d_ln_n0_dr_f = jnp.full_like(state.r, -1.0 / Ln)
+                    d_ln_T_dr_f  = jnp.full_like(state.r, -1.0 / LT)
+                state = push_particles_and_weights_fa(
+                    state, E_psi_p, E_theta_p, E_alpha_p,
+                    B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p, q_at_r_p, g_aa_p,
+                    n0_p_f, T_p_f, d_ln_n0_dr_f, d_ln_T_dr_f,
+                    q_over_m, cfg.mi, cfg.dt, geom.R0,
+                    E_par_em=E_par_em_p,
+                )
+            else:
+                state = push_particles_fa(
+                    state, E_psi_p, E_theta_p, E_alpha_p,
+                    B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p, q_at_r_p, g_aa_p,
+                    q_over_m, cfg.mi, cfg.dt, geom.R0,
+                    E_par_em=E_par_em_p,
+                )
 
             # Radial boundary clamp (absorbing wall)
             state = state._replace(
@@ -734,34 +771,35 @@ def _run_with_geom(
             )
 
             # 5. Update δf weights
-            if cfg.use_global and global_profiles is not None:
-                # Global mode: per-particle profiles from radial interpolation
-                n0_p, T_p, _Te_p, q_at_r_p, d_ln_n0_dr, d_ln_T_dr = interp_profiles(
-                    global_profiles, state.r
-                )
-            else:
-                # Flux-tube mode: constant-gradient profiles (original behavior)
-                n0_p, T_p = _get_profiles(state.r, cfg)
-                d_ln_n0_dr = jnp.full_like(state.r, -1.0 / Ln)
-                d_ln_T_dr  = jnp.full_like(state.r, -1.0 / LT)
-                q_at_r_p   = _interp_q(state.r, geom)
+            if not cfg.fused_rk4:
+                if cfg.use_global and global_profiles is not None:
+                    # Global mode: per-particle profiles from radial interpolation
+                    n0_p, T_p, _Te_p, q_at_r_p, d_ln_n0_dr, d_ln_T_dr = interp_profiles(
+                        global_profiles, state.r
+                    )
+                else:
+                    # Flux-tube mode: constant-gradient profiles (original behavior)
+                    n0_p, T_p = _get_profiles(state.r, cfg)
+                    d_ln_n0_dr = jnp.full_like(state.r, -1.0 / Ln)
+                    d_ln_T_dr  = jnp.full_like(state.r, -1.0 / LT)
+                    q_at_r_p   = _interp_q(state.r, geom)
 
-            _weight_update_fn = update_weights_semi_implicit if cfg.semi_implicit_weights else update_weights
-            state = _weight_update_fn(
-                state,
-                E_psi_p,
-                E_theta_p,
-                E_alpha_p,
-                B_p,
-                gradB_psi_p,
-                gradB_th_p,
-                kappa_psi_p,
-                kappa_th_p,
-                q_at_r_p,
-                n0_p, T_p,
-                d_ln_n0_dr, d_ln_T_dr,
-                q_over_m, cfg.mi, cfg.R0, cfg.dt,
-            )
+                _weight_update_fn = update_weights_semi_implicit if (cfg.semi_implicit_weights or cfg.use_cn_weights) else update_weights
+                state = _weight_update_fn(
+                    state,
+                    E_psi_p,
+                    E_theta_p,
+                    E_alpha_p,
+                    B_p,
+                    gradB_psi_p,
+                    gradB_th_p,
+                    kappa_psi_p,
+                    kappa_th_p,
+                    q_at_r_p,
+                    n0_p, T_p,
+                    d_ln_n0_dr, d_ln_T_dr,
+                    q_over_m, cfg.mi, cfg.R0, cfg.dt,
+                )
 
             # Apply Krook damping in buffer zones (global mode only)
             if cfg.use_global and global_profiles is not None:
