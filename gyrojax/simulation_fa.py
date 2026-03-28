@@ -105,12 +105,10 @@ class SimConfigFA:
     implicit:        bool  = False   # use CN+Picard implicit scheme
     picard_max_iter: int   = 4       # max Picard iterations
     picard_tol:      float = 1e-3    # convergence tolerance on φ (L∞ norm)
-    semi_implicit_weights: bool = True   # semi-implicit CN weight update (unconditionally stable)
-    use_cn_weights: bool = True          # alias for semi_implicit_weights
+    semi_implicit_weights: bool = False  # semi-implicit CN weight update (unconditionally stable)
+    use_cn_weights: bool = False         # alias for semi_implicit_weights (set True to enable CN update)
     # Electromagnetic — Phase 5
     beta: float = 0.0   # plasma beta — 0.0 = electrostatic (default), >0 = electromagnetic
-    # Fused RK4: integrate GC + weight equation together (avoids recomputing drifts)
-    fused_rk4: bool = True
 
 
 class DiagnosticsFA(NamedTuple):
@@ -464,12 +462,10 @@ def _run_with_geom(
 
                 # 1. scatter — state.zeta is already field-aligned α; just mod 2π for grid lookup
                 state_fa = state._replace(zeta=state.zeta % (2 * jnp.pi))
-                # Fix 2: compute trilinear indices once for scatter+gather
-                _part_indices = compute_particle_indices(state_fa, _gs, geom)
                 if scatter_fn is not None:
                     delta_n = scatter_fn(state_fa, geom, _gs) * cfg.n0_avg
                 else:
-                    delta_n = scatter_with_indices(state_fa.weight, _part_indices, _gs) * cfg.n0_avg
+                    delta_n = scatter_to_grid_fa(state_fa, geom, _gs) * cfg.n0_avg
 
                 # 2. solve poisson — Fix 1: cache phi_hat
                 phi, _phi_hat_cached = solve_poisson_fa(delta_n, geom, cfg.n0_avg, cfg.Te, cfg.Ti, cfg.mi, cfg.e)
@@ -496,10 +492,9 @@ def _run_with_geom(
                 else:
                     A_par = None
 
-                # 3. gather E — Fix 1+2: use cached phi_hat + cached particle indices
-                _E_psi_g, _E_th_g, _E_al_g = compute_efield_fa_from_hat(_phi_hat_cached, geom, *_gs)
+                # 3. gather E — Fix 1 only: original gather_from_grid_fa
                 state_gather = state._replace(zeta=state.zeta % (2 * jnp.pi))
-                E_psi_p, E_theta_p, E_alpha_p = gather_with_indices(_E_psi_g, _E_th_g, _E_al_g, _part_indices)
+                E_psi_p, E_theta_p, E_alpha_p = gather_from_grid_fa(phi, state_gather, geom)
 
                 # 3b. EM correction: add ∂A∥/∂t to E_theta (inductive E∥)
                 # E∥_eff = -∇∥φ - ∂A∥/∂t  ≈  E_theta - (A_par - A_par_prev)/dt
@@ -515,19 +510,7 @@ def _run_with_geom(
                     new_A_par = A_par_prev
 
                 # 4. push — using geometry at current (pre-push) positions
-                if cfg.fused_rk4:
-                    n0_p_fused, T_p_fused = _get_profiles(state.r, cfg)
-                    d_ln_n0_dr_fused = jnp.full_like(state.r, -1.0 / Ln)
-                    d_ln_T_dr_fused  = jnp.full_like(state.r, -1.0 / LT)
-                    state = push_particles_and_weights_fa(
-                        state, E_psi_p, E_theta_p, E_alpha_p,
-                        B_p, gBpsi_p, gBth_p, kpsi_p, kth_p, q_at_r_p, g_aa_p,
-                        n0_p_fused, T_p_fused, d_ln_n0_dr_fused, d_ln_T_dr_fused,
-                        q_over_m, cfg.mi, cfg.dt, geom.R0,
-                        E_par_em=E_par_em_p,
-                    )
-                else:
-                    state = push_particles_fa(
+                state = push_particles_fa(
                         state, E_psi_p, E_theta_p, E_alpha_p,
                         B_p, gBpsi_p, gBth_p, kpsi_p, kth_p, q_at_r_p, g_aa_p,
                         q_over_m, cfg.mi, cfg.dt, geom.R0,
@@ -547,9 +530,8 @@ def _run_with_geom(
                 d_ln_n0_dr = jnp.full_like(state.r, -1.0 / Ln)
                 d_ln_T_dr  = jnp.full_like(state.r, -1.0 / LT)
 
-                if not cfg.fused_rk4:
-                    _scan_w_fn = update_weights_semi_implicit if (cfg.semi_implicit_weights or cfg.use_cn_weights) else update_weights
-                    state = _scan_w_fn(
+                _scan_w_fn = update_weights_semi_implicit if (cfg.semi_implicit_weights or cfg.use_cn_weights) else update_weights
+                state = _scan_w_fn(
                         state, E_psi_p, E_theta_p, E_alpha_p,
                         B_p, gBpsi_p, gBth_p, kpsi_p, kth_p,
                         q_at_r_p, n0_p, T_p,
@@ -736,24 +718,7 @@ def _run_with_geom(
         else:
             # ---- Explicit RK4 step ----
             # 4. Push guiding centers (RK4)
-            if cfg.fused_rk4:
-                if cfg.use_global and global_profiles is not None:
-                    n0_p_f, T_p_f, _Te_p_f, _q_f, d_ln_n0_dr_f, d_ln_T_dr_f = interp_profiles(
-                        global_profiles, state.r
-                    )
-                else:
-                    n0_p_f, T_p_f = _get_profiles(state.r, cfg)
-                    d_ln_n0_dr_f = jnp.full_like(state.r, -1.0 / Ln)
-                    d_ln_T_dr_f  = jnp.full_like(state.r, -1.0 / LT)
-                state = push_particles_and_weights_fa(
-                    state, E_psi_p, E_theta_p, E_alpha_p,
-                    B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p, q_at_r_p, g_aa_p,
-                    n0_p_f, T_p_f, d_ln_n0_dr_f, d_ln_T_dr_f,
-                    q_over_m, cfg.mi, cfg.dt, geom.R0,
-                    E_par_em=E_par_em_p,
-                )
-            else:
-                state = push_particles_fa(
+            state = push_particles_fa(
                     state, E_psi_p, E_theta_p, E_alpha_p,
                     B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p, q_at_r_p, g_aa_p,
                     q_over_m, cfg.mi, cfg.dt, geom.R0,
@@ -771,7 +736,7 @@ def _run_with_geom(
             )
 
             # 5. Update δf weights
-            if not cfg.fused_rk4:
+            if True:  # always update weights
                 if cfg.use_global and global_profiles is not None:
                     # Global mode: per-particle profiles from radial interpolation
                     n0_p, T_p, _Te_p, q_at_r_p, d_ln_n0_dr, d_ln_T_dr = interp_profiles(
