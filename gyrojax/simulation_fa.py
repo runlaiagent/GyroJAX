@@ -416,7 +416,7 @@ def _run_with_geom(
     use_scan = (
         cfg.electron_model == 'adiabatic' and
         cfg.collision_model == 'none' and
-        not cfg.use_weight_spread and   # weight spreading needs Python for-loop
+        # use_weight_spread is now supported inside lax.scan via jax.lax.cond
         not cfg.implicit                # implicit scheme uses lax.while_loop — use Python loop
     )
 
@@ -501,8 +501,11 @@ def _run_with_geom(
                     dA_dt_grid = (A_par - A_par_prev) / cfg.dt
                     dA_dt_p, _, _ = gather_from_grid_fa(dA_dt_grid, state_gather, geom)
                     E_theta_p = E_theta_p - dA_dt_p
+                    # E_par_em = -∂A∥/∂t gathered to particle positions
+                    E_par_em_p = -dA_dt_p
                     new_A_par = A_par
                 else:
+                    E_par_em_p = None
                     new_A_par = A_par_prev
 
                 # 4. push — using geometry at current (pre-push) positions
@@ -510,6 +513,7 @@ def _run_with_geom(
                     state, E_psi_p, E_theta_p, E_alpha_p,
                     B_p, gBpsi_p, gBth_p, kpsi_p, kth_p, q_at_r_p, g_aa_p,
                     q_over_m, cfg.mi, cfg.dt, geom.R0,
+                    E_par_em=E_par_em_p,
                 )
 
                 # 5. clamp r and vpar
@@ -537,6 +541,19 @@ def _run_with_geom(
                 if cfg.nu_soft > 0.0:
                     new_w = soft_weight_damp(state.weight, cfg.nu_soft * cfg.dt, cfg.w_sat, cfg.soft_damp_alpha)
                     state = state._replace(weight=new_w)
+
+                # Weight spreading inside scan (GTC technique)
+                if cfg.use_weight_spread and cfg.weight_spread_interval > 0:
+                    def _do_spread(_):
+                        state_fa_ws = state._replace(zeta=state.zeta % (2 * jnp.pi))
+                        return spread_weights(state_fa_ws, geom, _gs).weight.astype(jnp.float32)
+                    def _skip_spread(_):
+                        return state.weight.astype(jnp.float32)
+                    new_w_spread = jax.lax.cond(
+                        step_count % cfg.weight_spread_interval == 0,
+                        _do_spread, _skip_spread, None,
+                    )
+                    state = state._replace(weight=new_w_spread)
 
                 # Improvement 2: Pullback transformation every pullback_interval steps
                 do_pullback = (
@@ -683,6 +700,9 @@ def _run_with_geom(
         if cfg.beta > 0.0 and dA_dt_grid is not None:
             dA_dt_p, _, _ = gather_from_grid_fa(dA_dt_grid, state_gather, geom)
             E_theta_p = E_theta_p - dA_dt_p
+            E_par_em_p = -dA_dt_p
+        else:
+            E_par_em_p = None
 
         # Pre-interpolate geometry at current positions
         B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p, g_aa_p = interp_fa_to_particles(
@@ -700,6 +720,7 @@ def _run_with_geom(
                 state, E_psi_p, E_theta_p, E_alpha_p,
                 B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p, q_at_r_p, g_aa_p,
                 q_over_m, cfg.mi, cfg.dt, geom.R0,
+                E_par_em=E_par_em_p,
             )
 
             # Radial boundary clamp (absorbing wall)

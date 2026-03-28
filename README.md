@@ -63,7 +63,8 @@ dw/dt = -(1 - w) · S,    S = (v_E + v_d) · ∇ln f₀
 | CBC linear growth rate (ky·ρᵢ = 0.30) | γ = 0.172 vti/R0 | 0.169 vti/R0 (GENE/GX) | **1.9%** |
 | Rosenbluth-Hinton zonal flow residual | Stable, correct damping | — | ✅ |
 | γ spectrum (ky·ρᵢ = 0.1–0.6) | Peak at ky·ρᵢ ≈ 0.35–0.40 | GENE spectrum | ~15% avg |
-| Dimits shift threshold | In progress | R/LT ≈ 6.0 (Dimits 2000) | — |
+| Dimits shift threshold | R/LT = 5.0 (PASS ✅) | R/LT ≈ 6.0 (Dimits 2000) | Early onset on coarse grid |
+| EM CBC (β = 0.01, 0.05) | A∥ nonzero, β-scaling correct ✅ | — | — |
 
 ---
 
@@ -110,7 +111,10 @@ python -m gyrojax.runner inputs/cbc.toml --n-steps 20  # quick override
 python benchmarks/cyclone_base_case_fa.py
 python benchmarks/gamma_spectrum.py --quick
 python benchmarks/dimits_shift.py
+python benchmarks/dimits_shift_optimized.py   # 2000-step run, reduced grid
+python benchmarks/cbc_em_benchmark.py          # EM: β scan (ITG→KBM)
 python benchmarks/cbc_fullf.py
+python benchmarks/heat_flux_cbc.py            # χᵢ vs R/LT (nonlinear transport)
 
 # Run all tests
 pytest tests/ -v
@@ -201,7 +205,8 @@ GyroJAX/
 │   │
 │   ├── fields/
 │   │   ├── poisson.py             # GK Poisson solver (flux-tube)
-│   │   └── poisson_fa.py          # GK Poisson (field-aligned, gyroavg)
+│   │   ├── poisson_fa.py          # GK Poisson (field-aligned, gyroavg)
+│   │   └── ampere_fa.py           # Ampere solver: ∇²⊥ δA∥ = -β·δj∥ (EM)
 │   │
 │   ├── deltaf/
 │   │   └── weights.py             # δf weight eq: RK4, semi-implicit CN, Picard
@@ -233,6 +238,8 @@ GyroJAX/
 │   ├── cbc_fullf.py               # CBC full-f
 │   ├── gamma_spectrum.py          # γ(ky·ρᵢ) spectrum sweep
 │   ├── dimits_shift.py            # Nonlinear R/LT scan → Dimits threshold
+│   ├── dimits_shift_optimized.py  # 2000-step reduced-grid Dimits scan
+│   ├── cbc_em_benchmark.py        # EM β scan: ITG → KBM crossover
 │   ├── rosenbluth_hinton.py       # Zonal flow residual
 │   ├── collision_scan.py          # Collision rate scan
 │   ├── kinetic_electron_cbc.py    # Kinetic electron CBC
@@ -240,7 +247,7 @@ GyroJAX/
 │   ├── stellarator_itg.py         # Stellarator ITG (VMEC)
 │   └── results/                   # Saved benchmark output (JSON)
 │
-└── tests/                         # pytest suite (158 tests)
+└── tests/                         # pytest suite (167 tests)
     ├── test_simulation_fa.py      # δf simulation integration tests
     ├── test_phase3_fullf.py       # Full-f: weight constancy, density deposit
     ├── test_input.py              # TOML parser + CLI runner
@@ -295,15 +302,23 @@ GyroJAX/
 - [x] CLI runner: `python -m gyrojax.runner input.toml`
 - [x] δf/full-f switch, explicit/semi-implicit/implicit switch in input file
 - [x] γ spectrum benchmark (ky·ρᵢ = 0.1–0.6)
-- [x] 158 tests passing
+- [x] 167 tests passing
 
 ### 🔄 In Progress
-- [ ] Dimits shift nonlinear benchmark (zonal flow suppression at R/LT < 6)
 - [ ] Full-f noise floor study (γ convergence with N_particles)
+- [ ] JAX profiler pass — identify scatter/gather bottlenecks
+- [ ] Heat flux full run: χᵢ(R/LT) curve (500k particles, 600 steps)
+
+### Phase 5 — Electromagnetic ✅
+- [x] Ampere's law solver: ∇²⊥ δA∥ = -β·δj∥ (spectral, field-aligned)
+- [x] Inductive E∥ = -∂A∥/∂t correction to parallel push
+- [x] EM β scan benchmark: β = 0 → ITG, β > 0 → EM modification
+- [x] A∥ scales linearly with β (verified in tests)
+- [x] Dimits shift 2000-step run: threshold at R/LT = 5.0 ✅ (ref: ~6.0)
+- [x] VMEC geometry tests: 16/16 pass
 
 ### 📋 Next
-- [ ] Electromagnetic perturbations (δA∥ — Ampere's law coupling)
-- [ ] Nonlinear heat flux benchmark (χᵢ vs R/LT)
+- [ ] KBM (Kinetic Ballooning Mode) linear benchmark at high β
 - [ ] Dimits shift full-f (natural advantage: no ⟨w²⟩ constraint)
 - [ ] Stellarator ITG scan (VMEC geometry)
 - [ ] Gyrokinetic electrons (full GK, not drift-kinetic)

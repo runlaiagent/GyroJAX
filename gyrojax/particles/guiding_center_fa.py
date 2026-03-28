@@ -47,6 +47,7 @@ def _gc_rhs_fa_batched(
     q_over_m: float,
     mi: float,
     R0: float,
+    E_par_em: jnp.ndarray = None,  # (N,) inductive E∥ = -∂A∥/∂t (EM correction)
 ):
     """Batched (N,) RHS of guiding-center equations in field-aligned coords."""
     Omega = q_over_m * B
@@ -75,8 +76,10 @@ def _gc_rhs_fa_batched(
     dtheta_dt = vpar / (q_at_psi * R0)    # parallel streaming
     dalpha_dt = vE_alpha                   # ExB in α direction
 
-    # Parallel force: mirror only (E∥ ≈ 0 for perpendicular modes)
-    dvpar_dt   = -(mu / mi) * gBpsi
+    # Parallel force: mirror + inductive E∥ = -∂A∥/∂t (EM correction)
+    dvpar_dt = -(mu / mi) * gBpsi
+    if E_par_em is not None:
+        dvpar_dt = dvpar_dt + q_over_m * E_par_em
 
     return dpsi_dt, dtheta_dt, dalpha_dt, dvpar_dt
 
@@ -98,6 +101,7 @@ def push_particles_fa(
     mi: float,
     dt: float,
     R0: float,
+    E_par_em: jnp.ndarray = None,  # (N,) inductive E∥ = -∂A∥/∂t (EM only)
 ) -> GCState:
     """
     Push all particles one timestep in field-aligned coords using RK4.
@@ -123,7 +127,7 @@ def push_particles_fa(
             psi_, theta_, alpha_, vpar_,
             state.mu, E_psi, E_theta, E_alpha,
             B, gBpsi, gBth, kpsi, kth, q_at_psi, g_aa_p,
-            q_over_m, mi, R0,
+            q_over_m, mi, R0, E_par_em,
         )
 
     # RK4 — all operations are batched over N particles with no vmap needed

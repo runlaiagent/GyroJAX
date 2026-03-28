@@ -21,3 +21,9 @@ dev = ["pytest", "pytest-xdist"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["gyrojax*"]
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore::RuntimeWarning:.*numpy.ndarray size changed.*",
+    "ignore:numpy.ndarray size changed:RuntimeWarning",
+]

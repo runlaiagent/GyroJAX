@@ -1,0 +1,64 @@
+{
+  "benchmark": "dimits_shift_optimized",
+  "grid": {
+    "Npsi": 12,
+    "Ntheta": 24,
+    "Nalpha": 24
+  },
+  "N_particles": 200000,
+  "n_steps": 2000,
+  "dt": 0.05,
+  "noise_control": {
+    "canonical_loading": true,
+    "use_pullback": true,
+    "pullback_interval": 100,
+    "nu_krook": 0.005,
+    "nu_soft": 0.01,
+    "use_weight_spread": true
+  },
+  "dimits_threshold": 5.0,
+  "pass_criterion": "4.5 <= threshold <= 7.5",
+  "passed": true,
+  "results": [
+    {
+      "rlt": 5.0,
+      "status": "ok",
+      "phi_max": 2.0441248416900635,
+      "Q_i": 1.85933790145819,
+      "zonal_rms": 0.1070310133646043,
+      "weight_rms": 1.1014270782470703,
+      "elapsed_s": 35.59380030632019,
+      "steps_per_sec": 56.189560619770944
+    },
+    {
+      "rlt": 6.0,
+      "status": "ok",
+      "phi_max": 7.4291276931762695,
+      "Q_i": 8.692254935944765,
+      "zonal_rms": 0.25657901232702335,
+      "weight_rms": 2.918844699859619,
+      "elapsed_s": 32.820746183395386,
+      "steps_per_sec": 60.937066720677926
+    },
+    {
+      "rlt": 6.9,
+      "status": "ok",
+      "phi_max": 7.9325690269470215,
+      "Q_i": 55.82301258947899,
+      "zonal_rms": 0.33008875071429356,
+      "weight_rms": 3.7534005641937256,
+      "elapsed_s": 32.919912815093994,
+      "steps_per_sec": 60.75350233257565
+    },
+    {
+      "rlt": 8.0,
+      "status": "ok",
+      "phi_max": 6.697229385375977,
+      "Q_i": -1.6620304721335502,
+      "zonal_rms": 0.25538199829838204,
+      "weight_rms": 4.01599645614624,
+      "elapsed_s": 35.96376371383667,
+      "steps_per_sec": 55.61153209419295
+    }
+  ]
+}
