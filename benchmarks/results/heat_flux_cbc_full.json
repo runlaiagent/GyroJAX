@@ -1,0 +1,67 @@
+{
+  "description": "Nonlinear CBC heat flux scan: chi_i vs R/LT",
+  "parameters": {
+    "N_particles": 200000,
+    "n_steps": 600,
+    "dt": 0.05,
+    "R0": 1.0,
+    "a": 0.18,
+    "q0": 1.4,
+    "q1": 0.5,
+    "R0_over_Ln": 2.2
+  },
+  "results": [
+    {
+      "R0_over_LT": 4.0,
+      "Q_i_avg": -17313613.568055555,
+      "chi_i_avg": -4328403.392013889,
+      "elapsed_s": 11.43657374382019
+    },
+    {
+      "R0_over_LT": 5.0,
+      "Q_i_avg": 1074280.7473958333,
+      "chi_i_avg": 214856.15362413196,
+      "elapsed_s": 7.360623598098755
+    },
+    {
+      "R0_over_LT": 6.0,
+      "Q_i_avg": 13818070.798611112,
+      "chi_i_avg": 2303011.862717014,
+      "elapsed_s": 7.288527965545654
+    },
+    {
+      "R0_over_LT": 6.5,
+      "Q_i_avg": 18283576.147569444,
+      "chi_i_avg": 2812857.9718424478,
+      "elapsed_s": 7.824374198913574
+    },
+    {
+      "R0_over_LT": 7.0,
+      "Q_i_avg": 23127055.18611111,
+      "chi_i_avg": 3303865.189192708,
+      "elapsed_s": 7.411845684051514
+    },
+    {
+      "R0_over_LT": 8.0,
+      "Q_i_avg": 27843225.935416665,
+      "chi_i_avg": 3480403.241927083,
+      "elapsed_s": 7.168699741363525
+    },
+    {
+      "R0_over_LT": 9.0,
+      "Q_i_avg": NaN,
+      "chi_i_avg": NaN,
+      "elapsed_s": 7.9560723304748535
+    },
+    {
+      "R0_over_LT": 10.0,
+      "Q_i_avg": 33889345.49791667,
+      "chi_i_avg": 3388934.60625,
+      "elapsed_s": 7.085991144180298
+    }
+  ],
+  "expected": {
+    "Dimits_shift": "chi_i ~ 0 for R/LT < 6",
+    "anomalous_transport": "chi_i > 0 for R/LT > 6.5"
+  }
+}
