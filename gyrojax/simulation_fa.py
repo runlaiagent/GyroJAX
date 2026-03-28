@@ -32,7 +32,7 @@ from gyrojax.geometry.field_aligned import (
 )
 from gyrojax.particles.guiding_center import GCState, init_maxwellian_particles
 from gyrojax.particles.guiding_center_fa import push_particles_fa, push_particles_and_weights_fa
-from gyrojax.deltaf.weights import update_weights, update_weights_cn, update_weights_semi_implicit, pullback_weights, soft_weight_damp, spread_weights
+from gyrojax.deltaf.weights import update_weights, update_weights_cn, update_weights_semi_implicit, pullback_weights, soft_weight_damp, spread_weights, spread_weights_nonzonal
 from gyrojax.fields.poisson_fa import solve_poisson_fa, compute_efield_fa, compute_efield_fa_from_hat, filter_single_mode
 from gyrojax.interpolation.scatter_gather_fa import scatter_to_grid_fa, gather_from_grid_fa, compute_particle_indices, scatter_with_indices, gather_with_indices
 from gyrojax.geometry.profiles import build_cbc_profiles, interp_profiles, krook_damping
@@ -96,6 +96,7 @@ class SimConfigFA:
     # GTC-style weight spreading
     use_weight_spread: bool = False   # periodic weight smoothing onto grid
     weight_spread_interval: int = 10  # spread every N steps
+    zonal_preserving_spread: bool = True  # if True, preserve zonal flow component during spread
     # Electron model
     electron_model: str = 'adiabatic'   # 'adiabatic' | 'drift_kinetic'
     me_over_mi:     float = 1.0/1836.0
@@ -107,6 +108,9 @@ class SimConfigFA:
     picard_tol:      float = 1e-3    # convergence tolerance on φ (L∞ norm)
     semi_implicit_weights: bool = False  # semi-implicit CN weight update (unconditionally stable)
     use_cn_weights: bool = False         # alias for semi_implicit_weights (set True to enable CN update)
+    # Absorbing wall BC
+    absorbing_wall: bool = False   # if True, zero weights of escaped particles (absorbing BC)
+                                   # if False (default), use hard clamp (legacy behavior)
     # Electromagnetic — Phase 5
     beta: float = 0.0   # plasma beta — 0.0 = electrostatic (default), >0 = electromagnetic
 
@@ -447,8 +451,14 @@ def _run_with_geom(
         # Materialize grid_shape as plain Python ints so lax.scan sees static values
         _gs = (int(Npsi), int(Ntheta), int(Nalpha))
 
+        # Fix 7: close over initial pullback reference positions as constants.
+        # They never change during the scan, so no need to carry them in every step.
+        r0_closed    = r0_init
+        vpar0_closed = vpar0_init
+        mu0_closed   = mu0_init
+
         def step_fn(carry, _):
-            state, phi, nan_flag, step_count, r0_c, vpar0_c, mu0_c, A_par_prev = carry
+            state, phi, nan_flag, step_count, A_par_prev = carry
 
             def do_step(args):
                 state, phi, A_par_prev = args
@@ -517,9 +527,20 @@ def _run_with_geom(
                         E_par_em=E_par_em_p,
                     )
 
-                # 5. clamp r and vpar
+                # 5. Radial BC + vpar cap
+                _psi_min = geom.psi_grid[0] * 1.001
+                _psi_max = geom.psi_grid[-1] * 0.999
+                if cfg.absorbing_wall:
+                    # Absorbing wall BC: zero out weights of escaped particles
+                    _outside = (state.r < _psi_min) | (state.r > _psi_max)
+                    _new_w = jnp.where(_outside, jnp.zeros_like(state.weight), state.weight)
+                    _new_r = jnp.clip(state.r, _psi_min, _psi_max)
+                    state = state._replace(r=_new_r, weight=_new_w)
+                else:
+                    state = state._replace(
+                        r=jnp.clip(state.r, _psi_min, _psi_max),
+                    )
                 state = state._replace(
-                    r=jnp.clip(state.r, geom.psi_grid[0]*1.001, geom.psi_grid[-1]*0.999),
                     vpar=jnp.clip(state.vpar, -cfg.vpar_cap * cfg.vti, cfg.vpar_cap * cfg.vti),
                 )
 
@@ -548,7 +569,8 @@ def _run_with_geom(
                 if cfg.use_weight_spread and cfg.weight_spread_interval > 0:
                     def _do_spread(_):
                         state_fa_ws = state._replace(zeta=state.zeta % (2 * jnp.pi))
-                        return spread_weights(state_fa_ws, geom, _gs).weight.astype(jnp.float32)
+                        _spread_fn = spread_weights_nonzonal if cfg.zonal_preserving_spread else spread_weights
+                        return _spread_fn(state_fa_ws, geom, _gs).weight.astype(jnp.float32)
                     def _skip_spread(_):
                         return state.weight.astype(jnp.float32)
                     new_w_spread = jax.lax.cond(
@@ -563,12 +585,12 @@ def _run_with_geom(
                     cfg.pullback_interval > 0
                 )
                 if do_pullback:
-                    n0_r0_p, T_r0_p = _get_profiles(r0_c, cfg)
+                    n0_r0_p, T_r0_p = _get_profiles(r0_closed, cfg)
                     B_p_scalar = float(geom.B0)
                     def _apply_pullback(_):
                         w_pb = pullback_weights(
                             state.weight, state.r, state.vpar, state.mu,
-                            r0_c, vpar0_c, mu0_c,
+                            r0_closed, vpar0_closed, mu0_closed,
                             B_p, B_p_scalar,
                             n0_p, T_p, n0_r0_p, T_r0_p, cfg.mi,
                         )
@@ -624,15 +646,15 @@ def _run_with_geom(
             )
             new_step_count = step_count + 1
 
-            return (new_state, new_phi, new_nan, new_step_count, r0_c, vpar0_c, mu0_c, new_A_par), diag
+            return (new_state, new_phi, new_nan, new_step_count, new_A_par), diag
 
         if verbose:
             print(f"[GyroJAX FA scan] JIT-compiling {cfg.n_steps} steps...")
         init_nan = jnp.array(False)
         init_step = jnp.array(0)
         init_A_par = jnp.zeros(_gs, dtype=jnp.float32)
-        (state, phi, _, _, _, _, _, _), diags_stacked = jax.lax.scan(
-            step_fn, (state, phi, init_nan, init_step, r0_init, vpar0_init, mu0_init, init_A_par), None, length=cfg.n_steps
+        (state, phi, _, _, _), diags_stacked = jax.lax.scan(
+            step_fn, (state, phi, init_nan, init_step, init_A_par), None, length=cfg.n_steps
         )
         jax.block_until_ready((state.r, phi, diags_stacked.phi_max))
         if verbose:
@@ -725,10 +747,20 @@ def _run_with_geom(
                     E_par_em=E_par_em_p,
                 )
 
-            # Radial boundary clamp (absorbing wall)
-            state = state._replace(
-                r=jnp.clip(state.r, geom.psi_grid[0]*1.001, geom.psi_grid[-1]*0.999)
-            )
+            # Radial boundary BC (absorbing wall or hard clamp)
+            _psi_min_bc = geom.psi_grid[0] * 1.001
+            _psi_max_bc = geom.psi_grid[-1] * 0.999
+            if cfg.absorbing_wall:
+                _outside_bc = (state.r < _psi_min_bc) | (state.r > _psi_max_bc)
+                _new_w_bc = jnp.where(_outside_bc, jnp.zeros_like(state.weight), state.weight)
+                state = state._replace(
+                    r=jnp.clip(state.r, _psi_min_bc, _psi_max_bc),
+                    weight=_new_w_bc,
+                )
+            else:
+                state = state._replace(
+                    r=jnp.clip(state.r, _psi_min_bc, _psi_max_bc)
+                )
 
             # Velocity cap (δf validity)
             state = state._replace(
@@ -791,10 +823,7 @@ def _run_with_geom(
                 n0_p, T_p, n0_r0_p, T_r0_p, cfg.mi,
             )
             state = state._replace(weight=w_pb.astype(jnp.float32))
-            # Update reference positions to current positions (rolling pullback)
-            r0_init    = state.r.copy()
-            vpar0_init = state.vpar.copy()
-            mu0_init   = state.mu.copy()
+            # Fixed reference positions (no rolling update — consistent with scan path)
 
         # 6b. Collisions
         state, key = apply_collisions(state, B_p, cfg, cfg.dt, key)
@@ -806,7 +835,8 @@ def _run_with_geom(
         if cfg.use_weight_spread and cfg.weight_spread_interval > 0:
             if step % cfg.weight_spread_interval == 0:
                 state_fa_ws = state._replace(zeta=state.zeta % (2 * jnp.pi))
-                state_spread = spread_weights(state_fa_ws, geom, grid_shape)
+                _spread_fn = spread_weights_nonzonal if cfg.zonal_preserving_spread else spread_weights
+                state_spread = _spread_fn(state_fa_ws, geom, grid_shape)
                 # Only update weights; keep original (unmodded) coordinates
                 state = state._replace(weight=state_spread.weight)
 
