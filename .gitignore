@@ -13,3 +13,4 @@ build/
 *.npy
 *.npz
 .DS_Store
+site/
