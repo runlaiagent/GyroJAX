@@ -1,0 +1,86 @@
+{
+  "description": "KBM linear benchmark: gamma(beta), CBC R/LT=6.9, delta-f",
+  "parameters": {
+    "N_particles": 100000,
+    "n_steps": 200,
+    "R_over_LT": 6.9,
+    "pert_amp": 1e-05,
+    "single_mode": true,
+    "k_mode": 5
+  },
+  "devices": "[CudaDevice(id=0)]",
+  "results": [
+    {
+      "beta": 0.0,
+      "status": "ok",
+      "gamma": 0.9714504380525754,
+      "gamma_late": 0.02617921152650001,
+      "phi_max_final": 0.27573442459106445,
+      "weight_rms_final": 2.552826404571533,
+      "elapsed_s": 5.962371587753296
+    },
+    {
+      "beta": 0.002,
+      "status": "ok",
+      "gamma": 0.6147752251495506,
+      "gamma_late": -0.19328520791655207,
+      "phi_max_final": 0.15058588981628418,
+      "weight_rms_final": 1.2370593547821045,
+      "elapsed_s": 4.130373239517212
+    },
+    {
+      "beta": 0.005,
+      "status": "ok",
+      "gamma": 0.8479855007157546,
+      "gamma_late": -0.34762211629921497,
+      "phi_max_final": 0.2093651294708252,
+      "weight_rms_final": 1.1882166862487793,
+      "elapsed_s": 3.8947222232818604
+    },
+    {
+      "beta": 0.008,
+      "status": "ok",
+      "gamma": 0.6250672188506909,
+      "gamma_late": -0.0454840538786653,
+      "phi_max_final": 0.2209993451833725,
+      "weight_rms_final": 1.4563007354736328,
+      "elapsed_s": 4.116297960281372
+    },
+    {
+      "beta": 0.01,
+      "status": "ok",
+      "gamma": 0.9682650500155294,
+      "gamma_late": 0.05743790470532988,
+      "phi_max_final": 0.3456264138221741,
+      "weight_rms_final": 2.1781983375549316,
+      "elapsed_s": 3.785869598388672
+    },
+    {
+      "beta": 0.012,
+      "status": "ok",
+      "gamma": 0.8193737861342415,
+      "gamma_late": -0.035514542662747256,
+      "phi_max_final": 5.08698844909668,
+      "weight_rms_final": 6.450737953186035,
+      "elapsed_s": 3.761368751525879
+    },
+    {
+      "beta": 0.015,
+      "status": "ok",
+      "gamma": 0.859337234239888,
+      "gamma_late": 0.657351924065879,
+      "phi_max_final": 5.526548385620117,
+      "weight_rms_final": 7.184768199920654,
+      "elapsed_s": 3.809894561767578
+    },
+    {
+      "beta": 0.02,
+      "status": "ok",
+      "gamma": 1.711824743590165,
+      "gamma_late": 0.4066062262561015,
+      "phi_max_final": 4.0995941162109375,
+      "weight_rms_final": 7.834089756011963,
+      "elapsed_s": 3.8485476970672607
+    }
+  ]
+}
