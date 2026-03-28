@@ -691,8 +691,11 @@ def _run_with_geom(
         init_nan = jnp.array(False)
         init_step = jnp.array(0)
         init_A_par = jnp.zeros(_gs, dtype=jnp.float32)
-        (state, phi, _, _, _), diags_stacked = jax.lax.scan(
-            step_fn, (state, phi, init_nan, init_step, init_A_par), None, length=cfg.n_steps
+        def _scan_body(carry, _xs):
+            return jax.lax.scan(step_fn, carry, _xs, length=cfg.n_steps)
+        _scan_jit = jax.jit(_scan_body, donate_argnums=(0,))
+        (state, phi, _, _, _), diags_stacked = _scan_jit(
+            (state, phi, init_nan, init_step, init_A_par), None
         )
         jax.block_until_ready((state.r, phi, diags_stacked.phi_max))
         if verbose:
