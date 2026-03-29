@@ -1,75 +1,114 @@
 # GyroJAX input file — Cyclone Base Case (delta-f)
-# Linear ITG benchmark: matches Dimits et al. 2000 growth rate gamma ~ 0.17 vti/R0
+# Fully annotated reference: covers every available setting.
+# Linear ITG benchmark: target γ ≈ 0.17 vti/R0 (Dimits et al. 2000)
 
 [run]
 description     = "CBC linear benchmark — ITG growth rate (delta-f)"
-method          = "deltaf"          # "deltaf" or "fullf"
+method          = "deltaf"          # "deltaf" | "fullf"
 time_integrator = "explicit"        # "explicit" | "semi_implicit" | "implicit"
 
+# ── Grid ──────────────────────────────────────────────────────────────────────
 [grid]
-Npsi   = 16
-Ntheta = 32
-Nalpha = 64
+Npsi   = 16    # radial grid points (ψ)
+Ntheta = 32    # poloidal grid points (θ)
+Nalpha = 64    # toroidal/α grid points — sets ky·ρi resolution
 
+# ── Particles ─────────────────────────────────────────────────────────────────
 [particles]
 N_particles = 300000
-loading     = "maxwellian"   # "maxwellian" | "canonical"
-vpar_cap    = 4.0
+loading     = "maxwellian"   # "maxwellian" | "canonical" (lower noise)
+vpar_cap    = 4.0            # cap |v∥| at vpar_cap·vti (removes runaways)
+N_electrons = 0              # kinetic electron markers (0 = use ion count)
 
+# ── Time ──────────────────────────────────────────────────────────────────────
 [time]
-dt      = 0.05
-n_steps = 200
+dt                  = 0.05   # time step in R0/vti units
+n_steps             = 200    # total simulation steps
+checkpoint_interval = 0      # save full restart checkpoint every N steps (0=off)
 
+# ── Geometry ──────────────────────────────────────────────────────────────────
 [geometry]
-type = "salpha"   # "salpha" | "vmec"
-R0   = 1.0
-a    = 0.18
-B0   = 1.0
-q0   = 1.4
-q1   = 0.5
+R0 = 1.0    # major radius
+a  = 0.18   # minor radius
+B0 = 1.0    # magnetic field on axis
+q0 = 1.4    # safety factor q(r) = q0 + q1·(r/a)
+q1 = 0.5    # magnetic shear parameter
 
+# ── Physics ───────────────────────────────────────────────────────────────────
 [physics]
-Ti         = 1.0
-Te         = 1.0
-mi         = 1.0
-rho_star   = 0.005556    # rho_i/a = 1/180
-R0_over_LT = 6.9
-R0_over_Ln = 2.2
-n0_avg     = 1.0
-vti        = 1.0
+Ti          = 1.0         # ion temperature
+Te          = 1.0         # electron temperature
+mi          = 1.0         # ion mass
+rho_star    = 0.005556    # ρi/a = 1/180 (sets gyroradius; e = 1/rho_star)
+# e         = 180.0       # alternative: set e directly (overrides rho_star)
+R0_over_LT  = 6.9         # ion temperature gradient drive
+R0_over_LTe = 6.9         # electron temperature gradient (kinetic-electron runs)
+R0_over_Ln  = 2.2         # density gradient
+n0_avg      = 1.0         # reference density
+vti         = 1.0         # ion thermal velocity
+beta        = 0.0         # plasma beta (0 = electrostatic; >0 enables δA∥)
 
-[species]
-ions      = "gyrokinetic"   # always gyrokinetic
-electrons = "adiabatic"     # "adiabatic" | "drift_kinetic"
+# ── Radial profiles (global runs) ─────────────────────────────────────────────
+[profiles]
+LT_profile         = "flat"  # "flat" | "gaussian" — ion temperature profile shape
+Ln_profile         = "flat"  # "flat" | "gaussian" — density profile shape
+LT_profile_width   = 0.5     # gaussian width (fraction of minor radius)
+krook_buffer_width = 0.1     # Krook damping buffer at inner/outer wall (fraction of a)
+krook_buffer_rate  = 1.0     # Krook damping rate in buffer zones
 
+# ── Domain ────────────────────────────────────────────────────────────────────
 [domain]
-flux_tube = true   # false = global run
+flux_tube    = true    # true = local flux-tube (periodic radially)
+                       # false = global (radial profiles + Krook buffer BCs)
+global_domain = false  # internal flag for global geometry initialisation
 
+# ── Initialisation ────────────────────────────────────────────────────────────
 [init]
-pert_amp    = 1.0e-4
-single_mode = true
-k_mode      = 18
-zonal_init  = false
+pert_amp    = 1.0e-4   # initial perturbation amplitude
+single_mode = true     # true = seed one ky mode (fastest growing); false = broad spectrum
+k_mode      = 18       # which α-wavenumber mode to seed (single_mode=true)
+k_alpha_min = 0        # zero out modes below this wavenumber (zonal flow filter)
+zonal_init  = false    # true = initialise with a zonal flow perturbation
 
+# ── Numerics ──────────────────────────────────────────────────────────────────
 [numerics]
 # Collisions
 collision_model = "none"    # "none" | "krook" | "lorentz" | "dougherty"
-nu_krook        = 0.005
-# Noise control (delta-f only)
-use_weight_spread      = false
-weight_spread_interval = 10
-canonical_loading      = false
-use_pullback           = false
-pullback_interval      = 50
-nu_soft                = 0.0
-# Implicit solver (only used when time_integrator = "implicit")
-picard_max_iter = 4
-picard_tol      = 1.0e-3
-# Alpha mode filter
-k_alpha_min = 0
+nu_krook        = 0.005     # Krook collision rate (BGK)
+nu_ei           = 0.01      # electron-ion collision rate (Lorentz/Dougherty)
+nu_coll         = 0.01      # generic collision rate
 
+# Noise control (delta-f)
+use_weight_spread          = false  # GTC-style grid-smoothed weight spread
+weight_spread_interval     = 10     # apply weight spread every N steps
+zonal_preserving_spread    = true   # preserve zonal flow during weight spread
+use_pullback               = false  # pullback transformation (long-time weight control)
+pullback_interval          = 50     # apply pullback every N steps
+nu_soft                    = 0.0    # soft weight damping amplitude (0=off)
+w_sat                      = 2.0    # weight saturation threshold for soft damping
+soft_damp_alpha            = 2      # soft damping exponent
+absorbing_wall             = false  # zero weights of escaped particles
+
+# Poisson / interpolation
+gyroaverage_scatter = true    # apply √Γ₀(b) gyroaveraging on scatter side
+use_radial_gaa      = true    # use radially-resolved g^αα(ψ) in FLR operator
+particle_shape      = "cic"   # "cic" (cloud-in-cell) | "ngp" (nearest grid point)
+scatter_block_size  = 0       # block size for scatter (0=auto)
+
+# Performance
+fused_rk4 = true   # fuse particle push + weight update into single RK4 (3.78× faster)
+
+# Implicit solver (only active when time_integrator = "implicit" or "semi_implicit")
+use_cn_weights  = false   # Crank-Nicolson weight update (bounded, prevents blowup)
+picard_max_iter = 4       # max Picard iterations per step (implicit mode)
+picard_tol      = 1.0e-3  # Picard convergence tolerance
+
+# ── Species ───────────────────────────────────────────────────────────────────
+[species]
+electrons  = "adiabatic"              # "adiabatic" | "drift_kinetic"
+me_over_mi = 0.0005446623093681918    # electron-to-ion mass ratio (H plasma default)
+subcycles_e = 10                      # electron subcycling steps per ion step
+
+# ── Output ────────────────────────────────────────────────────────────────────
 [output]
-diag_interval  = 1       # save diagnostics every N steps
-save_phi       = true    # save final phi field
-save_particles = false   # save final particle state (large!)
-output_dir     = "results/"
+output_file = ""   # path for HDF5 checkpoint/diagnostics output (""=disabled)
