@@ -283,70 +283,78 @@ GyroJAX/
 
 ## Roadmap
 
-### Phase 1 — Foundation ✅
-- [x] Field-aligned s-α geometry with q(r) profile
-- [x] δf GC pusher + RK4 weight advance
-- [x] GK Poisson solver (FFT/tridiagonal, gyroaveraging)
-- [x] CBC linear benchmark — γ = 0.172 vti/R0 (1.9% error vs GENE/GX)
-- [x] Rosenbluth-Hinton zonal flow test
+### Phase 1 — δf GK in s-α geometry ✅
+- [x] s-α geometry, GC pusher, δf weights, Padé Poisson, scatter/gather
+- [x] CBC benchmark: γ = 0.201 vti/R0 (18% error), 16/16 tests
 
-### Phase 2 — Production δf ✅
-- [x] Semi-implicit CN weight update (unconditionally bounded, prevents blowup)
-- [x] Implicit CN+Picard via `jax.lax.while_loop` (2–4 iter/step, 5–10× larger dt)
-- [x] Canonical Maxwellian loading (reduced sampling noise)
-- [x] Pullback transformation (long-time weight control)
-- [x] GTC-style weight spreading (grid-smoothed noise suppression)
-- [x] Global radial profiles + Krook buffer BCs
-- [x] Kinetic electrons (drift-kinetic, subcycling)
-- [x] Collision operators (Krook, Lorentz, Dougherty)
-- [x] VMEC stellarator geometry
-- [x] Multi-GPU sharding via `jax.sharding`
+### Phase 2a — Field-aligned coords + full Γ₀(b) Poisson ✅
+- [x] `gyrojax/geometry/field_aligned.py` — (ψ, θ, α) coords, twist-and-shift BCs
+- [x] `gyrojax/fields/poisson_fa.py` — exact Γ₀(b) = I₀(b)·exp(-b) operator
+- [x] FA guiding-center pusher + scatter/gather + full simulation loop
+- [x] CBC quick-mode: γ = 0.185 vti/R0 (9.1% error), 43/43 tests
 
-### Phase 3 — Full-f ✅
+### Phase 2b — VMEC geometry ✅
+- [x] `gyrojax/geometry/vmec_geometry.py` — load any VMEC wout_*.nc
+- [x] Tested on li383 stellarator + circular tokamak
+- [x] Stellarator ITG: γ ≈ 0.161 vti/R0 (in range 0.1–0.3 ✅), 59/59 tests
+
+### Phase 3 — Full-f PIC ✅
 - [x] True Vlasov PIC (dW/dt = 0, constant marker weights)
-- [x] Full δn deposit for Poisson (not just perturbation)
-- [x] Systematic resampling (CDF-based, uniform offset)
-- [x] Full-f CBC benchmark (`benchmarks/cbc_fullf.py`)
-- [x] Weight constancy verified: `std(W)/mean(W) < 1e-3` ✅
+- [x] Full δn deposit, systematic resampling (CDF-based)
+- [x] Full-f CBC: γ = 0.162 vti/R0 (4.8% error ✅), 79/79 tests
 
-### Phase 4 — Usability ✅
-- [x] TOML input files — GX-style, no Python required
-- [x] CLI runner: `python -m gyrojax.runner input.toml`
-- [x] δf/full-f switch, explicit/semi-implicit/implicit switch in input file
-- [x] γ spectrum benchmark (ky·ρᵢ = 0.1–0.6)
-- [x] 167 tests passing
+### Phase 4 — Diagnostics, electrons, normalization ✅
+- [x] `gyrojax/diagnostics/` — zonal flow, heat flux, spectra, 6-panel dashboard, `extract_growth_rate_smart()`
+- [x] `gyrojax/electrons/` — adiabatic + drift-kinetic electron model
+- [x] `gyrojax/normalization.py` — GENE/GX hat-units, NormParams, ρ★ explicit
+- [x] Global geometry: radial profiles, Krook buffer BCs, global CBC
+- [x] Collision operators: Krook, Lorentz pitch-angle, Dougherty FP
+- [x] Kinetic electrons: DK pusher (JIT fori_loop), coupled Poisson
+- [x] 120/120 tests
 
-### 🔄 In Progress
-- [ ] KBM (Kinetic Ballooning Mode) linear benchmark at high β
-- [ ] Full-f noise floor study (γ convergence with N_particles)
-- [ ] Diagnostic: zonal flow shear d²φ/dψ² vs time
+### Phase 5 — Production Validation ✅
+- [x] `benchmarks/production_validation.py` — full report vs GENE/GX/GTC
+- [x] `benchmarks/rosenbluth_hinton.py` — R-H zonal flow residual test
+- [x] `benchmarks/gamma_spectrum.py` — γ(ky·ρᵢ) spectrum vs Dimits 2000
+- [x] Multi-GPU sharding via `jax.sharding`, fused RK4 pusher (3.78× speedup)
+- [x] Electromagnetic: Ampere solver, β scan ITG→KBM, Dimits shift 2000-step run
+- [x] 129/129 tests
 
-### Phase 5 — Electromagnetic ✅
-- [x] Ampere's law solver: ∇²⊥ δA∥ = -β·δj∥ (spectral, field-aligned)
-- [x] Inductive E∥ = -∂A∥/∂t correction to parallel push
-- [x] EM β scan benchmark: β = 0 → ITG, β > 0 → EM modification
-- [x] A∥ scales linearly with β (verified in tests)
-- [x] Dimits shift 2000-step run: threshold at R/LT = 6.9 ✅ (ref: ~6.0)
+### Phase 6 — I/O, Long Runs & Post-processing ✅
+- [x] `run_long_simulation_fa(cfg, n_total_steps, chunk_size)` — chunked GPU runner, HDF5 auto-save, GPU memory freed between chunks → 10k-step production runs on 8 GB GPU
+- [x] `gyrojax/io/postprocess.py` — file-based χᵢ(t), γ(t), E(kα), weight PDF; fully decoupled from simulation
 
-### Phase 6 — Algorithmic Optimization ✅
-- [x] Fused RK4 pusher+weights: single integrator for 5 equations → **3.78× speedup**
-- [x] phi_hat caching: Poisson solve → E-field with zero redundant FFTs
-- [x] Trilinear index caching: scatter + gather share precomputed (i,j,k) indices
-- [x] Smaller lax.scan carry: pullback refs closed-over (3×N arrays removed from carry)
-- [x] Symmetric gyroaveraging: √Γ₀(b) on scatter side (δn) to match field side (φ)
-- [x] Radially-resolved g^αα(ψ): FLR operator uses radial profile, not flux-tube scalar
-- [x] Zonal-flow-preserving weight spread: subtract/add zonal mean before/after spread
-- [x] Absorbing wall BC: escaped particles have weights zeroed (opt-in, `absorbing_wall=True`)
-- [x] Semi-implicit CN weight update (opt-in, `use_cn_weights=True`)
-- [x] All optimizations validated: 167 tests pass, Dimits threshold R/LT=6.9 ✅
+### Phase 7 — Local vs Global Simulation ✅
+- [x] **Local (flux-tube)** mode: periodic radial domain, default
+- [x] **Global** mode: radial profiles + Krook buffer BCs (`use_global=True`)
+- [x] Both modes validated against CBC benchmarks
 
-### 📋 Next
-- [ ] KBM linear benchmark at high β (Phase 7)
-- [ ] Dimits shift full-f (natural advantage: no ⟨w²⟩ constraint)
-- [ ] Stellarator ITG scan (VMEC geometry)
-- [ ] Gyrokinetic electrons (full GK, not drift-kinetic)
-- [ ] Adaptive timestepping
-- [ ] Input file: VMEC geometry path support
+### 🔄 Phase 8 — ITG Stellarator Scan (in progress)
+- [x] Scan infrastructure: `benchmarks/itg_stellarator_scan.py` — 300k particles, chunked HDF5, warm-up JIT
+- [ ] **Fix γ extraction**: current scan uses naive polyfit; must use `extract_growth_rate_smart()` with correct `pert_amp` and run length to match CBC benchmark settings (γ=0.185 at q0=1.4, q1=0.5)
+- [ ] Re-run scan: q0∈[1.0,1.4,2.0,3.0], q1∈[0.0,0.5,1.0,2.0], R0/LT∈[5,6.9,8,10]
+- [ ] Nonlinear TEM saturation scan (electron drive)
+
+### 📋 Phase 9 — Performance & Scaling
+- [ ] Multi-GPU particle scan parallelism (scan points across GPUs)
+- [ ] XLA compilation profiling + kernel fusion opportunities
+- [ ] Particle load balancing
+- [ ] Benchmark: time-to-solution vs GENE/GX on same hardware
+
+### 📋 Phase 10 — Advanced Physics
+- [ ] **Full collision operator** — Lorentz pitch-angle (neoclassical transport)
+- [ ] **Full GK electrons** — promote DK → full gyrokinetic; enables ETG + coupled ITG-TEM (needs chunked runner + finer Nα)
+- [ ] Electromagnetic fluctuations (δA∥ fully coupled)
+- [ ] Gyrofluid closure comparison
+
+### 📋 Phase 11 — High-risk Physics
+- [ ] **ETG modes** — ~43× finer Nα grid, feasible with chunked runs
+- [ ] **Nonlinear saturation / heat flux** — turbulent steady-state χᵢ
+
+### 📋 Phase 12 — Stellarator Production
+- [ ] W7-X geometry (VMEC from real experiment)
+- [ ] Stellarator CBC benchmark (Baumgaertel et al. 2011)
+- [ ] ETG modes in stellarator geometry
 
 ## CBC Parameters (Cyclone Base Case)
 
