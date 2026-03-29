@@ -329,6 +329,11 @@ GyroJAX/
 - [x] **Global** mode: radial profiles + Krook buffer BCs (`use_global=True`)
 - [x] Both modes validated against CBC benchmarks
 
+### 🔄 In Progress (cross-cutting)
+- [ ] **KBM linear benchmark** — kinetic ballooning mode at high β (`benchmarks/cbc_em_benchmark.py`); need clean γ(β) curve through ITG→KBM crossover
+- [ ] **Full-f noise floor study** — γ convergence with N_particles (full-f CBC); document minimum N for reliable results
+- [ ] **Zonal flow shear diagnostic** — d²φ/dψ² vs time; needed for Dimits shift physics and nonlinear transport runs
+
 ### 🔄 Phase 8 — ITG Stellarator Scan (in progress)
 - [x] Scan infrastructure: `benchmarks/itg_stellarator_scan.py` — 300k particles, chunked HDF5, warm-up JIT
 - [ ] **Fix γ extraction**: current scan uses naive polyfit; must use `extract_growth_rate_smart()` with correct `pert_amp` and run length to match CBC benchmark settings (γ=0.185 at q0=1.4, q1=0.5)
