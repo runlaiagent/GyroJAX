@@ -506,6 +506,11 @@ def _run_with_geom(
             geom.psi_grid, cfg.krook_buffer_width, cfg.krook_buffer_rate
         )
 
+    # Pre-compute constant gradient scalars (avoid recomputing inside lax.scan)
+    # XLA can fold these Python float constants, reducing per-step array allocations.
+    _inv_Ln = float(-1.0 / Ln) if Ln != float('inf') else 0.0
+    _inv_LT = float(-1.0 / LT) if LT != float('inf') else 0.0
+
     # ------------------------------------------------------------------ #
     # Fast path: lax.scan for adiabatic electrons, flux-tube, no collisions
     # ------------------------------------------------------------------ #
@@ -638,8 +643,8 @@ def _run_with_geom(
                 if cfg.fused_rk4 and not (cfg.semi_implicit_weights or cfg.use_cn_weights):
                     # 4+6 combined: push + weight update in one RK4 pass
                     n0_p_fused, T_p_fused = _get_profiles(state.r, cfg)
-                    d_ln_n0_dr_fused = jnp.full_like(state.r, -1.0 / Ln)
-                    d_ln_T_dr_fused  = jnp.full_like(state.r, -1.0 / LT)
+                    d_ln_n0_dr_fused = jnp.full(state.r.shape, _inv_Ln, dtype=jnp.float32)
+                    d_ln_T_dr_fused  = jnp.full(state.r.shape, _inv_LT, dtype=jnp.float32)
                     state = push_particles_and_weights_fa(
                             state, E_psi_p, E_theta_p, E_alpha_p,
                             B_p, gBpsi_p, gBth_p, kpsi_p, kth_p, q_at_r_p, g_aa_p,
@@ -687,8 +692,8 @@ def _run_with_geom(
                     # NOTE: global_profiles inside lax.scan is a future enhancement;
                     # for now always use flux-tube _get_profiles even when use_global=True.
                     n0_p, T_p = _get_profiles(state.r, cfg)
-                    d_ln_n0_dr = jnp.full_like(state.r, -1.0 / Ln)
-                    d_ln_T_dr  = jnp.full_like(state.r, -1.0 / LT)
+                    d_ln_n0_dr = jnp.full(state.r.shape, _inv_Ln, dtype=jnp.float32)
+                    d_ln_T_dr  = jnp.full(state.r.shape, _inv_LT, dtype=jnp.float32)
 
                     _scan_w_fn = update_weights_semi_implicit if (cfg.semi_implicit_weights or cfg.use_cn_weights) else update_weights
                     state = _scan_w_fn(
@@ -897,8 +902,8 @@ def _run_with_geom(
             if cfg.fused_rk4 and not (cfg.semi_implicit_weights or cfg.use_cn_weights):
                 # 4+5 combined: fused push + weight update
                 _n0_p_f, _T_p_f = _get_profiles(state.r, cfg)
-                _d_ln_n0_dr_f = jnp.full_like(state.r, -1.0 / Ln)
-                _d_ln_T_dr_f  = jnp.full_like(state.r, -1.0 / LT)
+                _d_ln_n0_dr_f = jnp.full(state.r.shape, _inv_Ln, dtype=jnp.float32)
+                _d_ln_T_dr_f  = jnp.full(state.r.shape, _inv_LT, dtype=jnp.float32)
                 state = push_particles_and_weights_fa(
                         state, E_psi_p, E_theta_p, E_alpha_p,
                         B_p, gradB_psi_p, gradB_th_p, kappa_psi_p, kappa_th_p, q_at_r_p, g_aa_p,
@@ -965,8 +970,8 @@ def _run_with_geom(
                     else:
                         # Flux-tube mode: constant-gradient profiles (original behavior)
                         n0_p, T_p = _get_profiles(state.r, cfg)
-                        d_ln_n0_dr = jnp.full_like(state.r, -1.0 / Ln)
-                        d_ln_T_dr  = jnp.full_like(state.r, -1.0 / LT)
+                        d_ln_n0_dr = jnp.full(state.r.shape, _inv_Ln, dtype=jnp.float32)
+                        d_ln_T_dr  = jnp.full(state.r.shape, _inv_LT, dtype=jnp.float32)
                         q_at_r_p   = _interp_q(state.r, geom)
 
                     _weight_update_fn = update_weights_semi_implicit if (cfg.semi_implicit_weights or cfg.use_cn_weights) else update_weights
@@ -1193,6 +1198,24 @@ def run_long_simulation_fa(
         print(f"[long run] {n_total_steps} steps in {n_chunks} chunks of {chunk_size}")
         print(f"[long run] Grid: {cfg.Npsi}×{cfg.Ntheta}×{cfg.Nalpha}, {cfg.N_particles} particles")
 
+    # Build geometry once for all chunks (avoids rebuild + recompilation every chunk)
+    _geom = build_field_aligned_geometry(
+        Npsi=cfg.Npsi, Ntheta=cfg.Ntheta, Nalpha=cfg.Nalpha,
+        R0=cfg.R0, a=cfg.a, B0=cfg.B0, q0=cfg.q0, q1=cfg.q1,
+    )
+    # Build scatter/gather fns (same logic as run_simulation_fa)
+    _scatter_fn_long = None
+    _gather_fn_long = None
+    if cfg.particle_shape == "bspline":
+        def _scatter_fn_long(state, geom_, grid_shape):
+            return scatter_bspline(state, geom_, grid_shape)
+        def _gather_fn_long(phi, state, geom_):
+            return gather_bspline(phi, state, geom_, phi.shape)
+    elif cfg.scatter_block_size > 0:
+        _bs_long = cfg.scatter_block_size
+        def _scatter_fn_long(state, geom_, grid_shape):
+            return scatter_blocked(state, geom_, grid_shape, block_size=_bs_long)
+
     current_state = None
     writer_initialized = False
 
@@ -1204,9 +1227,11 @@ def run_long_simulation_fa(
         if verbose:
             print(f"[chunk {chunk_idx+1}/{n_chunks}] steps {chunk_idx*chunk_size}–{chunk_idx*chunk_size+steps_this_chunk-1}", flush=True)
 
-        diags, current_state, phi_history, aux = run_simulation_fa(
-            chunk_cfg, key=key, verbose=False,
-            init_state=current_state,
+        diags, current_state, phi_history, _geom_out = _run_with_geom(
+            chunk_cfg, _geom, key, verbose=False,
+            state0_override=current_state,
+            scatter_fn=_scatter_fn_long,
+            gather_fn=_gather_fn_long,
         )
 
         chunk_phi_rms = np.array([float(d.phi_rms) for d in diags])
@@ -1221,13 +1246,7 @@ def run_long_simulation_fa(
             from gyrojax.io.checkpoint import save_run, append_run
             step_offset = chunk_idx * chunk_size
             if not writer_initialized:
-                # Build geom for save_run
-                from gyrojax.geometry.field_aligned import build_field_aligned_geometry
-                geom = build_field_aligned_geometry(
-                    Npsi=cfg.Npsi, Ntheta=cfg.Ntheta, Nalpha=cfg.Nalpha,
-                    R0=cfg.R0, a=cfg.a, B0=cfg.B0, q0=cfg.q0, q1=cfg.q1,
-                )
-                save_run(output_file, diags, current_state, phi_history, geom, chunk_cfg, step_offset=step_offset)
+                save_run(output_file, diags, current_state, phi_history, _geom, chunk_cfg, step_offset=step_offset)
                 writer_initialized = True
             else:
                 append_run(output_file, diags, current_state, phi_history, step_offset=step_offset)

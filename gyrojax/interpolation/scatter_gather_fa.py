@@ -25,6 +25,32 @@ import jax.numpy as jnp
 from gyrojax.geometry.field_aligned import FieldAlignedGeometry, interp_fa_to_particles
 
 
+def _scatter_8corners_raw(val, i0, i1, j0, j1, k0, k1, wp, wt, wa, grid_shape):
+    """Scatter 8 CIC corners to flat grid without concatenation. Returns shape (size,).
+
+    Uses 8 chained .at[].add() ops on N-element arrays instead of one
+    concatenated (8N,) scatter, reducing peak intermediate memory ~8x.
+    """
+    Npsi, Ntheta, Nalpha = grid_shape
+    Nth_Nal = Ntheta * Nalpha
+    size = Npsi * Nth_Nal
+
+    def fi(i, j, k):
+        return i * Nth_Nal + j * Nalpha + k
+
+    return (
+        jnp.zeros(size, dtype=jnp.float32)
+        .at[fi(i0, j0, k0)].add(val * (1-wp) * (1-wt) * (1-wa))
+        .at[fi(i1, j0, k0)].add(val *    wp  * (1-wt) * (1-wa))
+        .at[fi(i0, j1, k0)].add(val * (1-wp) *    wt  * (1-wa))
+        .at[fi(i0, j0, k1)].add(val * (1-wp) * (1-wt) *    wa )
+        .at[fi(i1, j1, k0)].add(val *    wp  *    wt  * (1-wa))
+        .at[fi(i1, j0, k1)].add(val *    wp  * (1-wt) *    wa )
+        .at[fi(i0, j1, k1)].add(val * (1-wp) *    wt  *    wa )
+        .at[fi(i1, j1, k1)].add(val *    wp  *    wt  *    wa )
+    )
+
+
 def _trilinear_weights_fa(
     psi: jnp.ndarray,
     theta: jnp.ndarray,
@@ -95,30 +121,9 @@ def scatter_to_grid_fa(
     # with weights ~O(1). float32 gives ~7 significant digits.
     val  = state.weight.astype(jnp.float32)
     size = Npsi * Ntheta * Nalpha
-    Nth_Nal = Ntheta * Nalpha
 
-    # Single batched scatter: stack all 8 corners into (8*N,) arrays
-    all_flat = jnp.concatenate([
-        i0 * Nth_Nal + j0 * Nalpha + k0,
-        i1 * Nth_Nal + j0 * Nalpha + k0,
-        i0 * Nth_Nal + j1 * Nalpha + k0,
-        i0 * Nth_Nal + j0 * Nalpha + k1,
-        i1 * Nth_Nal + j1 * Nalpha + k0,
-        i1 * Nth_Nal + j0 * Nalpha + k1,
-        i0 * Nth_Nal + j1 * Nalpha + k1,
-        i1 * Nth_Nal + j1 * Nalpha + k1,
-    ])
-    all_weights = jnp.concatenate([
-        val*(1-wp)*(1-wt)*(1-wa),
-        val*   wp *(1-wt)*(1-wa),
-        val*(1-wp)*   wt *(1-wa),
-        val*(1-wp)*(1-wt)*   wa,
-        val*   wp *   wt *(1-wa),
-        val*   wp *(1-wt)*   wa,
-        val*(1-wp)*   wt *   wa,
-        val*   wp *   wt *   wa,
-    ])
-    grid = jnp.zeros(size, dtype=jnp.float32).at[all_flat].add(all_weights)
+    # Chained scatter: 8 corners via .at[].add() on N-element arrays (peak = N, not 8N)
+    grid = _scatter_8corners_raw(val, i0, i1, j0, j1, k0, k1, wp, wt, wa, grid_shape)
 
     n_particles = state.weight.shape[0]
     # Normalize so that uniform w=1 gives delta_n/n0 = 1 (dimensionless):
@@ -146,29 +151,9 @@ def scatter_weights_raw_fa(
     )
     val  = state.weight.astype(jnp.float32)
     size = Npsi * Ntheta * Nalpha
-    Nth_Nal = Ntheta * Nalpha
 
-    all_flat = jnp.concatenate([
-        i0 * Nth_Nal + j0 * Nalpha + k0,
-        i1 * Nth_Nal + j0 * Nalpha + k0,
-        i0 * Nth_Nal + j1 * Nalpha + k0,
-        i0 * Nth_Nal + j0 * Nalpha + k1,
-        i1 * Nth_Nal + j1 * Nalpha + k0,
-        i1 * Nth_Nal + j0 * Nalpha + k1,
-        i0 * Nth_Nal + j1 * Nalpha + k1,
-        i1 * Nth_Nal + j1 * Nalpha + k1,
-    ])
-    all_weights = jnp.concatenate([
-        val*(1-wp)*(1-wt)*(1-wa),
-        val*   wp *(1-wt)*(1-wa),
-        val*(1-wp)*   wt *(1-wa),
-        val*(1-wp)*(1-wt)*   wa,
-        val*   wp *   wt *(1-wa),
-        val*   wp *(1-wt)*   wa,
-        val*(1-wp)*   wt *   wa,
-        val*   wp *   wt *   wa,
-    ])
-    grid = jnp.zeros(size, dtype=jnp.float32).at[all_flat].add(all_weights)
+    # Chained scatter: 8 corners via .at[].add() on N-element arrays (peak = N, not 8N)
+    grid = _scatter_8corners_raw(val, i0, i1, j0, j1, k0, k1, wp, wt, wa, grid_shape)
     return grid.reshape(grid_shape)
 
 
@@ -255,29 +240,9 @@ def scatter_with_indices(
     i0, i1, j0, j1, k0, k1, wp, wt, wa = indices
     val  = weight.astype(jnp.float32)
     size = Npsi * Ntheta * Nalpha
-    Nth_Nal = Ntheta * Nalpha
 
-    all_flat = jnp.concatenate([
-        i0 * Nth_Nal + j0 * Nalpha + k0,
-        i1 * Nth_Nal + j0 * Nalpha + k0,
-        i0 * Nth_Nal + j1 * Nalpha + k0,
-        i0 * Nth_Nal + j0 * Nalpha + k1,
-        i1 * Nth_Nal + j1 * Nalpha + k0,
-        i1 * Nth_Nal + j0 * Nalpha + k1,
-        i0 * Nth_Nal + j1 * Nalpha + k1,
-        i1 * Nth_Nal + j1 * Nalpha + k1,
-    ])
-    all_weights = jnp.concatenate([
-        val*(1-wp)*(1-wt)*(1-wa),
-        val*   wp *(1-wt)*(1-wa),
-        val*(1-wp)*   wt *(1-wa),
-        val*(1-wp)*(1-wt)*   wa,
-        val*   wp *   wt *(1-wa),
-        val*   wp *(1-wt)*   wa,
-        val*(1-wp)*   wt *   wa,
-        val*   wp *   wt *   wa,
-    ])
-    grid = jnp.zeros(size, dtype=jnp.float32).at[all_flat].add(all_weights)
+    # Chained scatter: 8 corners via .at[].add() on N-element arrays (peak = N, not 8N)
+    grid = _scatter_8corners_raw(val, i0, i1, j0, j1, k0, k1, wp, wt, wa, grid_shape)
     n_particles = weight.shape[0]
     delta_n = grid.reshape(grid_shape) * (jnp.float32(size) / (jnp.float32(n_particles) + jnp.float32(1e-30)))
     return delta_n
@@ -364,29 +329,8 @@ def scatter_blocked(
             block_state.r, block_state.theta, block_state.zeta, geom, grid_shape
         )
         val  = block_state.weight.astype(jnp.float32)
-        size = Npsi * Ntheta * Nalpha
-        Nth_Nal = Ntheta * Nalpha
-        all_flat = jnp.concatenate([
-            i0 * Nth_Nal + j0 * Nalpha + k0,
-            i1 * Nth_Nal + j0 * Nalpha + k0,
-            i0 * Nth_Nal + j1 * Nalpha + k0,
-            i0 * Nth_Nal + j0 * Nalpha + k1,
-            i1 * Nth_Nal + j1 * Nalpha + k0,
-            i1 * Nth_Nal + j0 * Nalpha + k1,
-            i0 * Nth_Nal + j1 * Nalpha + k1,
-            i1 * Nth_Nal + j1 * Nalpha + k1,
-        ])
-        all_weights = jnp.concatenate([
-            val*(1-wp)*(1-wt)*(1-wa),
-            val*   wp *(1-wt)*(1-wa),
-            val*(1-wp)*   wt *(1-wa),
-            val*(1-wp)*(1-wt)*   wa,
-            val*   wp *   wt *(1-wa),
-            val*   wp *(1-wt)*   wa,
-            val*(1-wp)*   wt *   wa,
-            val*   wp *   wt *   wa,
-        ])
-        return jnp.zeros(size, dtype=jnp.float32).at[all_flat].add(all_weights).reshape(grid_shape)
+        # Chained scatter: 8 corners via .at[].add() on N-element arrays (peak = N, not 8N)
+        return _scatter_8corners_raw(val, i0, i1, j0, j1, k0, k1, wp, wt, wa, grid_shape).reshape(grid_shape)
 
     # vmap over the leading n_blocks axis
     grids = jax.vmap(_scatter_raw_block)(state_blocked)   # [n_blocks, Npsi, Ntheta, Nalpha]
